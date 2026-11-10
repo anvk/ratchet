@@ -1,0 +1,85 @@
+@import "tailwindcss";
+
+/*
+ * Theme colours, used as Tailwind classes such as bg-surface, border-line,
+ * text-muted or bg-green-soft. They switch with the system light/dark setting
+ * below, so components never need dark: variants.
+ */
+@theme {
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --color-page: #f7f7f5;
+  --color-surface: #ffffff;
+  --color-line: #e2e1dc;
+  --color-ink: #1f1f1c;
+  --color-muted: #6e6d66;
+  --color-accent: #2f5fd0;
+
+  /* Status colours: the -soft shade is the background behind the plain one. */
+  --color-grey: #8a8982;
+  --color-grey-soft: #efeeea;
+  --color-blue: #2f5fd0;
+  --color-blue-soft: #e4ebfb;
+  --color-green: #1c7d4d;
+  --color-green-soft: #dff3e7;
+  --color-red: #bf2f2f;
+  --color-red-soft: #fae3e1;
+
+  --animate-pulse-soft: pulse-soft 1.2s ease-in-out infinite;
+
+  @keyframes pulse-soft {
+    50% {
+      opacity: 0.6;
+    }
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-page: #171715;
+    --color-surface: #21211e;
+    --color-line: #383733;
+    --color-ink: #ecebe6;
+    --color-muted: #a09f97;
+    --color-accent: #8fb0f5;
+    --color-grey: #94938b;
+    --color-grey-soft: #2c2b28;
+    --color-blue: #8fb0f5;
+    --color-blue-soft: #1f2b45;
+    --color-green: #6fd29c;
+    --color-green-soft: #173325;
+    --color-red: #f09a93;
+    --color-red-soft: #43211f;
+  }
+}
+
+@layer base {
+  :root {
+    color-scheme: light dark;
+  }
+
+  body {
+    @apply bg-page text-ink;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+  a {
+    @apply text-accent;
+  }
+}
+
+/* React Flow draws its own elements, so they're styled through its classes. */
+.react-flow {
+  --xy-background-color: transparent;
+}
+
+.react-flow__edge-path {
+  stroke: var(--color-grey);
+  stroke-width: 1.5;
+}
+
+.react-flow__handle {
+  visibility: hidden;
+}

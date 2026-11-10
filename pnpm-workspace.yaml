@@ -1,0 +1,8 @@
+packages:
+  - workflowEngine
+  - api
+  - workflows
+  - client
+
+allowBuilds:
+  esbuild: true

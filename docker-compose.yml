@@ -1,0 +1,23 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: ratchet
+      POSTGRES_PASSWORD: ratchet
+      POSTGRES_DB: ratchet
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # These run only when the data volume is empty. After changing a schema
+      # file, run `pnpm db:reset` (deletes all local data), then `pnpm db:types`.
+      - ./workflowEngine/src/stores/postgres/schema.sql:/docker-entrypoint-initdb.d/001-engine.sql:ro
+      - ./workflows/payment/schema.sql:/docker-entrypoint-initdb.d/002-payment.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ratchet -d ratchet"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  pgdata:

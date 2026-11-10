@@ -1,0 +1,31 @@
+{
+  "name": "ratchet",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "pnpm@12.18.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "db:up": "docker compose up -d --wait",
+    "db:reset": "docker compose down -v && docker compose up -d --wait",
+    "db:types": "pnpm db:up && pnpm --filter @ratchet/engine db:types",
+    "dev": "pnpm db:up && concurrently -k -n api,worker-1,worker-2,worker-3,client -c blue,green,green,green,magenta \"pnpm --filter @ratchet/workflows api\" \"WORKER_ID=worker-1 pnpm --filter @ratchet/workflows worker\" \"WORKER_ID=worker-2 pnpm --filter @ratchet/workflows worker\" \"WORKER_ID=worker-3 pnpm --filter @ratchet/workflows worker\" \"pnpm --filter @ratchet/client dev\"",
+    "test": "pnpm db:up && pnpm -r test",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "oxlint",
+    "lint:fix": "oxlint --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "check": "pnpm typecheck && pnpm lint && pnpm format:check"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.0",
+    "oxlint": "^1.93.0",
+    "oxlint-tsgolint": "^7.0.2006",
+    "prettier": "^3.9.10",
+    "tsx": "^4.19.0",
+    "typescript": "^7.0.2"
+  }
+}
