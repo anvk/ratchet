@@ -136,8 +136,19 @@ export async function validateAccount({
   return { balanceCents };
 }
 
-/** Scores the payment's risk, and throws if the score is above 85. */
-export async function scoreRisk({ simulation }: { simulation: Simulation }) {
+/**
+ * Scores the payment's risk, and throws if the score is above 85. 1 to 2
+ * million paths take about 3 to 4.5 seconds of blocked event loop on an Apple
+ * Silicon laptop. `overloaded` runs a fixed 8 million (about 18 seconds), like
+ * an unusually heavy calculation.
+ */
+export async function scoreRisk({
+  simulation,
+  overloaded = false,
+}: {
+  simulation: Simulation;
+  overloaded?: boolean;
+}) {
   await pause({ simulation, minMs: 200, maxMs: 500 });
   const forced = simulation.forceOutcome;
   const limitInSigmas =
@@ -149,7 +160,9 @@ export async function scoreRisk({ simulation }: { simulation: Simulation }) {
   const paths =
     simulation.timeScale === 0
       ? 200
-      : Math.round(simulation.random({ label: "paths", min: 1_000_000, max: 2_000_000 }));
+      : overloaded
+        ? 8_000_000
+        : Math.round(simulation.random({ label: "paths", min: 1_000_000, max: 2_000_000 }));
   const score = simulateRisk({
     paths,
     limitInSigmas,

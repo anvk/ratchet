@@ -15,6 +15,11 @@ interface PaymentInput {
   forceOutcome?: Outcome;
   /** Multiplies waits and simulation size. 0 runs instantly. */
   timeScale?: number;
+  /**
+   * Makes the risk check's first attempt so heavy that its worker can't send
+   * heartbeats, so its lease expires and another worker redoes it.
+   */
+  overloadRisk?: boolean;
 }
 
 /** Builds the simulation for one attempt of one step. */
@@ -37,6 +42,10 @@ export default defineWorkflow<PaymentInput>({
     { label: "Insufficient funds", input: { forceOutcome: "insufficient-funds" } },
     { label: "Declined by risk score", input: { forceOutcome: "risk-declined" } },
     { label: "Sanctions match", input: { forceOutcome: "sanctions-match" } },
+    {
+      label: "Risk check overloads its worker",
+      input: { forceOutcome: "clear", overloadRisk: true },
+    },
   ],
   steps: [
     {
@@ -64,7 +73,16 @@ export default defineWorkflow<PaymentInput>({
       name: "score-risk",
       title: "Score risk",
       description: "Runs a Monte Carlo simulation and declines payments that score above 85.",
-      run: (ctx) => scoreRisk({ simulation: simulationFor(ctx) }),
+      // A risk check blocks its worker for 3 to 4.5 seconds, so no heartbeat can
+      // run until it ends. 10 seconds is twice the slowest normal check, and
+      // recovers a stuck one sooner than the engine's 30-second default.
+      leaseMs: 10_000,
+      run: (ctx) =>
+        scoreRisk({
+          simulation: simulationFor(ctx),
+          // Only the first attempt, so the retry on another worker succeeds.
+          overloaded: ctx.input.overloadRisk === true && ctx.attempt === 1,
+        }),
     },
     {
       name: "screen-sanctions",

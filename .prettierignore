@@ -1,3 +1,6 @@
 pnpm-lock.yaml
 dist
 **/*.gen.*
+# Written in the same style as each other; v1 is kept exactly as originally written.
+docs/how-the-engine-works-v1.md
+docs/how-the-engine-works-v2.md

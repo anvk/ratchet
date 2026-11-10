@@ -25,6 +25,8 @@
   --color-green-soft: #dff3e7;
   --color-red: #bf2f2f;
   --color-red-soft: #fae3e1;
+  --color-amber: #9a5b00;
+  --color-amber-soft: #fbeed5;
 
   --animate-pulse-soft: pulse-soft 1.2s ease-in-out infinite;
 
@@ -51,6 +53,8 @@
     --color-green-soft: #173325;
     --color-red: #f09a93;
     --color-red-soft: #43211f;
+    --color-amber: #f0c06e;
+    --color-amber-soft: #3b2c12;
   }
 }
 

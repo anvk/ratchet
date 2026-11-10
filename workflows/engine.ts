@@ -12,5 +12,8 @@ export const engine = createWorkflowEngine({
     closeTimeoutMs: 30_000,
     // "sticky" | "fair" | "oldest-run-first". Restart workers after changing it.
     claimOrder: "sticky",
+    // Steps can set their own leaseMs; this is the default.
+    leaseMs: 30_000,
+    sweepIntervalMs: 1000,
   },
 });

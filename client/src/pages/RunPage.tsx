@@ -6,10 +6,11 @@ import { fetchEvents, fetchRun } from "../services/workflows.service";
 import type { Step } from "@ratchet/api/types";
 import { formatDuration } from "../utils/format";
 import { FlowDiagram } from "../components/FlowDiagram";
+import { EventPill } from "../components/EventPill";
 import { StatusBadge } from "../components/StatusBadge";
+import { StepStatusBadge } from "../components/StepStatusBadge";
 import { ErrorMessage } from "../components/ErrorMessage";
 import { Panel } from "../components/Panel";
-import { STEP_STATUS_LABELS } from "../constants/statuses";
 import { URLS } from "../urls";
 
 function StepDetail({ step }: { step: Step }) {
@@ -19,7 +20,9 @@ function StepDetail({ step }: { step: Step }) {
       {step.description && <p className="-mt-1.5 mb-3 text-muted">{step.description}</p>}
       <dl className="grid grid-cols-[80px_minmax(0,1fr)] gap-x-3 gap-y-1.5 [&_dt]:text-muted">
         <dt>Status</dt>
-        <dd>{STEP_STATUS_LABELS[step.status]}</dd>
+        <dd>
+          <StepStatusBadge status={step.status} />
+        </dd>
         <dt>Attempt</dt>
         <dd>{step.attempt || "–"}</dd>
         <dt>Worker</dt>
@@ -110,11 +113,11 @@ export function RunPage() {
           <h2 className="mb-3 font-semibold">Events</h2>
           <ol>
             {events?.map((event) => (
-              <li key={event.id} className="flex flex-wrap gap-x-3 gap-y-0.5 py-0.75">
+              <li key={event.id} className="flex flex-wrap items-center gap-x-3 gap-y-0.5 py-0.75">
                 <time className="font-mono text-[13px] text-muted">
                   {new Date(event.at).toLocaleTimeString()}
                 </time>
-                <span className="font-medium">{event.type}</span>
+                <EventPill type={event.type} />
                 <span className="text-muted">
                   {[event.step_name, event.worker_id].filter(Boolean).join(" · ")}
                 </span>

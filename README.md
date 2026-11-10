@@ -10,7 +10,9 @@ pnpm install
 pnpm dev
 ```
 
-Open <http://localhost:5173>, pick a workflow and press **Start run**. `pnpm dev` starts Postgres, the API, three workers and the dashboard.
+Open <http://localhost:5173>, pick a workflow and press **Start run**. `pnpm dev` starts Postgres, the API, the orchestrator, three workers and the dashboard.
+How it all works is explained in [`docs/how-the-engine-works-v2.md`](docs/how-the-engine-works-v2.md)
+(the original design is in [v1](docs/how-the-engine-works-v1.md)).
 
 ```sh
 pnpm test        # engine tests against real Postgres and worker processes

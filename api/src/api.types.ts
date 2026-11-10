@@ -88,7 +88,7 @@ export interface RunDetail {
 /**
  * One entry in a run's history. `type` is one of `run_queued`, `run_started`,
  * `run_succeeded`, `run_failed`, `step_ready`, `step_claimed`, `step_succeeded`,
- * `step_failed` or `step_skipped`.
+ * `step_failed`, `step_skipped` or `step_lease_expired`.
  */
 export interface RunEvent {
   id: string;

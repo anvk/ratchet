@@ -1,23 +1,12 @@
 import type { WorkflowRunStatus } from "@ratchet/engine/constants";
-import { RUN_STATUS_LABELS } from "../constants/statuses";
+import { RUN_STATUS_LABELS, RUN_STATUS_TONES } from "../constants/statuses";
+import { Pill } from "./Pill";
 
-const COLORS: Record<WorkflowRunStatus, string> = {
-  queued: "bg-grey-soft text-grey",
-  running: "bg-blue-soft text-blue",
-  succeeded: "bg-green-soft text-green",
-  failed: "bg-red-soft text-red",
-};
-
+/** A run's status as a coloured pill, pulsing while it runs. */
 export function StatusBadge({ status }: { status: WorkflowRunStatus }) {
   return (
-    <span
-      className={`inline-flex items-center gap-1.5 rounded-full px-2.25 py-px text-xs/normal font-medium ${COLORS[status]}`}
-    >
-      <span
-        className={`size-1.75 rounded-full bg-current ${status === "running" ? "animate-pulse-soft motion-reduce:animate-none" : ""}`}
-        aria-hidden
-      />
+    <Pill tone={RUN_STATUS_TONES[status]} dot pulse={status === "running"}>
       {RUN_STATUS_LABELS[status]}
-    </span>
+    </Pill>
   );
 }

@@ -150,6 +150,7 @@ test("workers only claim steps from workflows they know", async () => {
     workerId: "other-engine",
     workflowNames: [foreign.name],
     order: "fair",
+    defaultLeaseMs: 30_000,
   });
   assert.equal(claim?.runId, runId);
 });

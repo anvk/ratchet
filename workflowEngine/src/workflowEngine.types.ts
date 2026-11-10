@@ -8,10 +8,16 @@ export interface StepContext<Input = any> {
   /** Outputs of earlier steps, by step name. */
   outputs: Record<string, any>;
   /**
-   * Stays the same across retries of this step. Pass it to anything with side
-   * effects, such as a payment provider, so a retry can't repeat the effect.
+   * Stays the same across every attempt of this step. Pass it to anything with
+   * side effects, such as a payment provider, so running the step again can't
+   * repeat the effect.
    */
   idempotencyKey: string;
+  /**
+   * Fires if this worker loses the step's lease, meaning another worker may
+   * already be running it. Stop early if you can: the result will be rejected.
+   */
+  signal: AbortSignal;
 }
 
 /** One step of a workflow: how to describe it, and the code to run. */
@@ -20,6 +26,12 @@ export interface StepDefinition<Input = any> {
   name: string;
   title: string;
   description: string;
+  /**
+   * How long a worker may go without a heartbeat before this step is given to
+   * another worker. Defaults to the engine's leaseMs. Heartbeats come every
+   * third of it, so a step that blocks the event loop for longer loses its lease.
+   */
+  leaseMs?: number;
   run(ctx: StepContext<Input>): Promise<unknown>;
 }
 
@@ -66,6 +78,8 @@ export interface Claim {
   position: number;
   /** Starts at 1. With workerId, proves this worker still owns the step. */
   attempt: number;
+  /** The lease this claim was given, which every heartbeat renews. */
+  leaseMs: number;
   workerId: string;
   runId: string;
   /** The workflow's name, not its id. */
@@ -114,6 +128,8 @@ export interface WorkflowStore {
     workerId: string;
     workflowNames: string[];
     order: ClaimOrder;
+    /** The lease for steps that don't set their own. */
+    defaultLeaseMs: number;
   }): Promise<Claim | null>;
   /**
    * Records success, then readies the next step or finishes the run. With
@@ -125,7 +141,17 @@ export interface WorkflowStore {
     claim: Claim;
     output: unknown;
     claimNext: boolean;
+    /** The lease for the next step if it doesn't set its own. */
+    defaultLeaseMs: number;
   }): Promise<{ completed: boolean; next: Claim | null }>;
+  /** Pushes a claim's lease forward by its leaseMs. False if this worker no longer owns the step. */
+  extendLease(claim: Claim): Promise<boolean>;
+  /**
+   * Makes every running step whose lease has expired ready again, so another
+   * worker can claim it. Returns how many it found. Safe to run from several
+   * processes at once.
+   */
+  sweepExpiredLeases(): Promise<number>;
   /** Records failure, skips the remaining steps and fails the run. False if the claim is stale. */
   failStep(claim: Claim, error: string): Promise<boolean>;
   /** Releases connections or file handles. */
@@ -142,6 +168,10 @@ export interface WorkflowEngineSettings {
   closeTimeoutMs: number;
   /** How workers choose their next step. See ClaimOrder. */
   claimOrder: ClaimOrder;
+  /** The lease for steps that don't set their own. See StepDefinition.leaseMs. */
+  leaseMs: number;
+  /** How often the orchestrator sweeps for expired leases. */
+  sweepIntervalMs: number;
 }
 
 /** A running configuration of the engine: its workflows, its storage and its settings. */
@@ -159,12 +189,18 @@ export interface WorkflowEngine {
   /** Runs a worker until the engine is closed. */
   runWorker(options?: { workerId?: string }): Promise<void>;
   /**
+   * Runs the orchestrator until the engine is closed. It looks after runs as a
+   * whole; so far, every sweepIntervalMs it makes steps whose worker stopped
+   * sending heartbeats ready again.
+   */
+  runOrchestrator(): Promise<void>;
+  /**
    * Stops workers from claiming more steps, waits for the steps they are running
    * for up to closeTimeoutMs, then closes the store. Safe to call more than once.
    *
    * With force, closes without waiting. A step still running when the store closes
-   * can't be interrupted, so its result is lost and it stays `running` until
-   * something recovers it.
+   * can't be interrupted, so its result is lost; once its lease expires, the
+   * orchestrator gives it to another worker.
    */
   close(options?: { force?: boolean }): Promise<void>;
 }
