@@ -28,12 +28,13 @@ The example workflows are fake. No real money or payment provider is involved.
 
 ## Layout
 
-| Path              | What's there                                                                                                                                                                                                    |
-| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `workflowEngine/` | The generic engine: workers, the registry and the `WorkflowStore` interface, with Postgres in `src/stores/postgres/`. Knows nothing about HTTP or any specific workflow. What it promises is in `guarantees.md` |
-| `api/`            | HTTP API for clients. Reads tables directly, makes every state change through the engine, and exports its response types from `src/api.types.ts`                                                                |
-| `workflows/`      | Workflow definitions, the list of them, and the process entry points                                                                                                                                            |
-| `client/`         | Dashboard: runs list and live diagram, driven only by the HTTP API                                                                                                                                              |
+| Path              | What's there                                                                                                                                                                                                                              |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `workflowEngine/` | The generic engine: workers, the orchestrator, leases, the registry and the `WorkflowStore` interface, with Postgres in `src/stores/postgres/`. Knows nothing about HTTP or any specific workflow. What it promises is in `guarantees.md` |
+| `api/`            | HTTP API for clients. Reads tables directly, makes every state change through the engine, and exports its response types from `src/api.types.ts`                                                                                          |
+| `workflows/`      | Workflow definitions, the list of them, and the process entry points: `api.ts`, `worker.ts` and `orchestrator.ts`                                                                                                                         |
+| `client/`         | Dashboard: runs list and live diagram, driven only by the HTTP API                                                                                                                                                                        |
+| `docs/`           | Walkthroughs of how the engine works, for newcomers: `how-the-engine-works-v2.md` describes the current engine, and `how-the-engine-works-v1.md` the original design before leases                                                        |
 
 ## Add a workflow
 
