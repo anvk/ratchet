@@ -1,0 +1,8 @@
+{
+  // Tests run in Node, so they get Node's types. The app itself keeps browser-only types.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"]
+  },
+  "include": ["."]
+}

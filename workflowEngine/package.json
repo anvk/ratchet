@@ -1,0 +1,25 @@
+{
+  "name": "@ratchet/engine",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./constants": "./src/workflowEngine.constants.ts",
+    "./postgres": "./src/stores/postgres/index.ts",
+    "./utils": "./src/workflowEngine.utils.ts"
+  },
+  "scripts": {
+    "db:types": "kysely-codegen --env-file ../.env --include-pattern 'public.{workflows,steps,workflow_runs,step_runs,events}' --out-file src/stores/postgres/db/schema.gen.ts",
+    "test": "node --env-file=../.env --import tsx --test --test-concurrency=1 tests/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "kysely": "^0.29.7",
+    "pg": "^8.13.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.11.0",
+    "kysely-codegen": "^0.20.0"
+  }
+}
