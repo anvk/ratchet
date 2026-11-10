@@ -45,6 +45,7 @@ export interface StepRuns {
   error: string | null;
   finished_at: Timestamp | null;
   id: Generated<string>;
+  lease_expires_at: Timestamp | null;
   name: string;
   output: Json | null;
   position: number;
@@ -59,6 +60,7 @@ export interface StepRuns {
 export interface Steps {
   description: string;
   id: Generated<string>;
+  lease_ms: number | null;
   name: string;
   position: number;
   title: string;

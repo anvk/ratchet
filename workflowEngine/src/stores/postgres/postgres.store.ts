@@ -39,7 +39,12 @@ function planVersion(definition: WorkflowDefinition): string {
     name: definition.name,
     title: definition.title,
     description: definition.description,
-    steps: definition.steps.map(({ name, title, description }) => ({ name, title, description })),
+    steps: definition.steps.map(({ name, title, description, leaseMs }) => ({
+      name,
+      title,
+      description,
+      leaseMs,
+    })),
   };
   return createHash("sha256").update(JSON.stringify(plan)).digest("hex").slice(0, 12);
 }
@@ -71,6 +76,7 @@ async function syncWorkflows(workflows: WorkflowDefinition[]) {
             title: step.title,
             description: step.description,
             position,
+            lease_ms: step.leaseMs ?? null,
           })),
         )
         .execute();
@@ -149,19 +155,33 @@ async function startRun({
   });
 }
 
+/** A timestamp this many milliseconds from now, by the database's clock. */
+const fromNow = (ms: number) => sql<Date>`now() + (${ms}::int * interval '1 millisecond')`;
+
 /**
- * Gives a ready step to this worker: marks it running, starts the run if this
- * is its first step, and gathers what the step needs to run.
+ * Gives a ready step to this worker: marks it running with a lease, starts the
+ * run if this is its first step, and gathers what the step needs to run.
  */
 async function takeStep({
   trx,
   stepRunId,
   workerId,
+  defaultLeaseMs,
 }: {
   trx: Tx;
   stepRunId: string;
   workerId: string;
+  defaultLeaseMs: number;
 }): Promise<Claim> {
+  // A step added at runtime has no plan row, so it gets the default.
+  const plan = await trx
+    .selectFrom("step_runs as sr")
+    .leftJoin("steps as s", "s.id", "sr.step_id")
+    .select("s.lease_ms")
+    .where("sr.id", "=", stepRunId)
+    .executeTakeFirstOrThrow();
+  const leaseMs = plan.lease_ms ?? defaultLeaseMs;
+
   const step = await trx
     .updateTable("step_runs")
     .set((eb) => ({
@@ -169,6 +189,7 @@ async function takeStep({
       attempt: eb("attempt", "+", 1),
       worker_id: workerId,
       started_at: sql<Date>`now()`,
+      lease_expires_at: fromNow(leaseMs),
     }))
     .where("id", "=", stepRunId)
     .returning(["id", "run_id", "name", "position", "attempt"])
@@ -211,6 +232,7 @@ async function takeStep({
     stepName: step.name,
     position: step.position,
     attempt: step.attempt,
+    leaseMs,
     workerId,
     runId: step.run_id,
     workflow: run.workflow,
@@ -231,10 +253,12 @@ async function claimStep({
   workerId,
   workflowNames,
   order,
+  defaultLeaseMs,
 }: {
   workerId: string;
   workflowNames: string[];
   order: ClaimOrder;
+  defaultLeaseMs: number;
 }): Promise<Claim | null> {
   if (workflowNames.length === 0) return null;
 
@@ -257,7 +281,7 @@ async function claimStep({
       .executeTakeFirst();
     if (!next) return null;
 
-    return takeStep({ trx, stepRunId: next.id, workerId });
+    return takeStep({ trx, stepRunId: next.id, workerId, defaultLeaseMs });
   });
 }
 
@@ -282,6 +306,7 @@ async function finishOwnedStep({
       output: output === undefined ? null : JSON.stringify(output),
       error: error ?? null,
       finished_at: sql<Date>`now()`,
+      lease_expires_at: null,
     })
     .where("id", "=", claim.stepRunId)
     .where("status", "=", "running")
@@ -299,10 +324,12 @@ async function completeStep({
   claim,
   output,
   claimNext,
+  defaultLeaseMs,
 }: {
   claim: Claim;
   output: unknown;
   claimNext: boolean;
+  defaultLeaseMs: number;
 }): Promise<{ completed: boolean; next: Claim | null }> {
   return db.transaction().execute(async (trx) => {
     if (!(await finishOwnedStep({ trx, claim, status: "succeeded", output }))) {
@@ -331,7 +358,12 @@ async function completeStep({
       // Still inside this transaction, so no other worker ever sees it ready.
       return {
         completed: true,
-        next: await takeStep({ trx, stepRunId: next.id, workerId: claim.workerId }),
+        next: await takeStep({
+          trx,
+          stepRunId: next.id,
+          workerId: claim.workerId,
+          defaultLeaseMs,
+        }),
       };
     }
 
@@ -392,12 +424,70 @@ async function failStep(claim: Claim, error: string): Promise<boolean> {
  * The WorkflowStore backed by Postgres. Reads DATABASE_URL when imported, and
  * every store in a process shares one connection pool, so close() closes it for all.
  */
+/** Renews a claim's lease, but only if this worker's attempt still owns the step. */
+async function extendLease(claim: Claim): Promise<boolean> {
+  const result = await db
+    .updateTable("step_runs")
+    .set({ lease_expires_at: fromNow(claim.leaseMs) })
+    .where("id", "=", claim.stepRunId)
+    .where("status", "=", "running")
+    .where("worker_id", "=", claim.workerId)
+    .where("attempt", "=", claim.attempt)
+    .executeTakeFirst();
+  return result.numUpdatedRows === 1n;
+}
+
+/**
+ * Makes running steps whose lease has expired ready again. The attempt stays as
+ * it is, so the next claim bumps it and the old worker's late result no longer
+ * matches. SKIP LOCKED lets several orchestrators sweep without blocking each other.
+ */
+async function sweepExpiredLeases(): Promise<number> {
+  return db.transaction().execute(async (trx) => {
+    const expired = await trx
+      .selectFrom("step_runs")
+      .select(["id", "run_id", "name", "attempt", "worker_id"])
+      .where("status", "=", "running")
+      .where("lease_expires_at", "<", sql<Date>`now()`)
+      .limit(100)
+      .forUpdate()
+      .skipLocked()
+      .execute();
+
+    for (const step of expired) {
+      await trx
+        .updateTable("step_runs")
+        .set({
+          status: "ready",
+          ready_at: sql<Date>`now()`,
+          worker_id: null,
+          started_at: null,
+          lease_expires_at: null,
+        })
+        .where("id", "=", step.id)
+        .execute();
+      await emit({
+        trx,
+        runId: step.run_id,
+        type: "step_lease_expired",
+        step: step.name,
+        attempt: step.attempt,
+        workerId: step.worker_id ?? undefined,
+      });
+      await emit({ trx, runId: step.run_id, type: "step_ready", step: step.name });
+    }
+    return expired.length;
+  });
+}
+
 export function createPostgresStore(): WorkflowStore {
   return {
     syncWorkflows,
     startRun,
     claimStep,
     completeStep,
+    extendLease,
+    sweepExpiredLeases,
     failStep,
     close: () => db.destroy(),
   };

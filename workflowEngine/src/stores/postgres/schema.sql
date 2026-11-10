@@ -36,6 +36,9 @@ CREATE TABLE steps (
   title       text NOT NULL,
   description text NOT NULL,
   position    int  NOT NULL,
+  -- How long a worker may go without a heartbeat before the step is given to
+  -- another worker. Null means the engine's default.
+  lease_ms    int  CHECK (lease_ms > 0),
   UNIQUE (workflow_id, name),
   UNIQUE (workflow_id, position)
 );
@@ -72,12 +75,17 @@ CREATE TABLE step_runs (
   ready_at    timestamptz,
   started_at  timestamptz,
   finished_at timestamptz,
+  -- While running: the worker owns the step until then, unless it extends the
+  -- lease with a heartbeat. After that, the orchestrator makes the step ready again.
+  lease_expires_at timestamptz,
   UNIQUE (run_id, name),
   UNIQUE (run_id, position)
 );
 
 -- Small because it covers only claimable steps, however much history builds up.
 CREATE INDEX step_runs_claim_idx ON step_runs (ready_at, id) WHERE status = 'ready';
+-- Lets the orchestrator find expired leases without scanning finished steps.
+CREATE INDEX step_runs_lease_idx ON step_runs (lease_expires_at) WHERE status = 'running';
 
 -- Append-only history, written in the same transaction as each state change.
 CREATE TABLE events (

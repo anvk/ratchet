@@ -39,6 +39,8 @@ function StepCard({ data: { step, selected } }: NodeProps<StepNode>) {
       <div className="mt-0.5 text-xs/normal">
         {STEP_STATUS_LABELS[step.status]}
         {step.worker_id ? ` · ${step.worker_id}` : ""}
+        {/* A step runs again after its worker loses the lease. */}
+        {step.attempt > 1 ? ` · attempt ${step.attempt}` : ""}
       </div>
       <Handle type="source" position={Position.Right} isConnectable={false} />
     </div>

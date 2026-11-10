@@ -20,9 +20,22 @@ export const WORKFLOW_RUN_STATUSES = Object.keys(workflowRunStatuses) as Workflo
 /** Statuses a run never leaves. */
 export const FINISHED_RUN_STATUSES: readonly WorkflowRunStatus[] = ["succeeded", "failed"];
 
+/** The settings an engine uses for anything createWorkflowEngine isn't given. */
 export const DEFAULT_ENGINE_SETTINGS: WorkflowEngineSettings = {
+  /** Idle workers ask for work 4 times a second: quick to react, light on the database. */
   pollMs: 250,
+  /** After an unexpected error, wait a second so a database outage isn't hammered. */
   errorBackoffMs: 1000,
+  /** Graceful close waits up to 30s for running steps, like a typical deploy's grace period. */
   closeTimeoutMs: 30_000,
+  /** A run stays on one worker from start to finish. */
   claimOrder: "sticky",
+  /**
+   * A worker that goes 30s without a heartbeat loses its step. Long enough for
+   * a busy event loop or a slow database to recover, short enough that a
+   * crashed worker's step is picked up within a minute.
+   */
+  leaseMs: 30_000,
+  /** Expired leases are swept every second, so a lost step waits at most a second longer. */
+  sweepIntervalMs: 1000,
 };

@@ -7,6 +7,7 @@ import type {
   WorkflowStore,
 } from "./workflowEngine.types.ts";
 import { assertUnique } from "./workflowEngine.utils.ts";
+import { runOrchestrator } from "./workflowEngine.orchestrator.ts";
 import { runWorker } from "./workflowEngine.worker.ts";
 
 /** Checks that a workflow is well formed and returns it, typing ctx.input in its steps. */
@@ -20,6 +21,11 @@ export function defineWorkflow<Input = unknown>(
     definition.steps.map((s) => s.name),
     `step in ${definition.name}`,
   );
+  for (const step of definition.steps) {
+    if (step.leaseMs !== undefined && !(Number.isInteger(step.leaseMs) && step.leaseMs > 0)) {
+      throw new Error(`Step ${definition.name}/${step.name} needs a whole, positive leaseMs`);
+    }
+  }
   return definition;
 }
 
@@ -46,15 +52,8 @@ export function createWorkflowEngine({
   const workers = new Set<Promise<void>>();
   let storeClosed: Promise<void> | undefined;
 
-  /** Runs a worker, and tracks it so close can wait for it. */
-  async function startWorker(workerId?: string) {
-    const worker = runWorker({
-      registry,
-      store,
-      settings: resolved,
-      stopSignal: stop.signal,
-      workerId,
-    });
+  /** Tracks a running worker or orchestrator, so close can wait for it to stop. */
+  async function track(worker: Promise<void>) {
     workers.add(worker);
     try {
       await worker;
@@ -82,7 +81,10 @@ export function createWorkflowEngine({
     settings: resolved,
     sync: () => store.syncWorkflows(workflows),
     startRun: (request) => store.startRun(request),
-    runWorker: ({ workerId } = {}) => startWorker(workerId),
+    runWorker: ({ workerId } = {}) =>
+      track(runWorker({ registry, store, settings: resolved, stopSignal: stop.signal, workerId })),
+    runOrchestrator: () =>
+      track(runOrchestrator({ store, settings: resolved, stopSignal: stop.signal })),
     async close({ force = false } = {}) {
       stop.abort();
       if (!force) await waitForWorkers();

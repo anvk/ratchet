@@ -26,6 +26,7 @@ function fakeStore() {
         stepName: "slow",
         position: 0,
         attempt: 1,
+        leaseMs: 30_000,
         workerId,
         runId: "run",
         workflow: "slow",
@@ -38,6 +39,8 @@ function fakeStore() {
       return { completed: true, next: null };
     },
     failStep: async () => true,
+    extendLease: async () => true,
+    sweepExpiredLeases: async () => 0,
     close: async () => {
       calls.closed++;
     },

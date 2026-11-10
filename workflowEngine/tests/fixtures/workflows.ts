@@ -1,3 +1,4 @@
+import { setTimeout as sleep } from "node:timers/promises";
 import { defineWorkflow } from "../../src/index.ts";
 
 interface PipelineInput {
@@ -30,4 +31,42 @@ export const pipeline = defineWorkflow<PipelineInput>({
   ],
 });
 
-export const workflows = [pipeline];
+interface SlowInput {
+  /** How long the first attempt waits, without blocking the event loop. */
+  waitMs?: number;
+  /** How long the first attempt blocks the event loop, so no heartbeat can run. */
+  blockMs?: number;
+}
+
+/**
+ * A step with a short lease whose first attempt is slow, in one of two ways.
+ * Later attempts finish at once, so a test can tell which attempt won.
+ */
+export const slow = defineWorkflow<SlowInput>({
+  name: "slow",
+  title: "Slow",
+  description: "A short-leased step whose first attempt takes a while.",
+  steps: [
+    {
+      name: "work",
+      title: "Work",
+      description: "Slow on the first attempt.",
+      leaseMs: 300,
+      async run(ctx) {
+        if (ctx.attempt === 1) {
+          if (ctx.input.waitMs) await sleep(ctx.input.waitMs);
+          if (ctx.input.blockMs) {
+            const until = Date.now() + ctx.input.blockMs;
+            while (Date.now() < until) {
+              // Busy, so timers (and heartbeats) can't fire.
+            }
+          }
+        }
+        return { attempt: ctx.attempt, leaseLost: ctx.signal.aborted };
+      },
+    },
+    { name: "done", title: "Done", description: "Runs after work.", run: async () => null },
+  ],
+});
+
+export const workflows = [pipeline, slow];

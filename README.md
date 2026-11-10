@@ -10,7 +10,9 @@ pnpm install
 pnpm dev
 ```
 
-Open <http://localhost:5173>, pick a workflow and press **Start run**. `pnpm dev` starts Postgres, the API, three workers and the dashboard.
+Open <http://localhost:5173>, pick a workflow and press **Start run**. `pnpm dev` starts Postgres, the API, the orchestrator, three workers and the dashboard.
+How it all works is explained in [`docs/how-the-engine-works-v2.md`](docs/how-the-engine-works-v2.md)
+(the original design is in [v1](docs/how-the-engine-works-v1.md)).
 
 ```sh
 pnpm test        # engine tests against real Postgres and worker processes
@@ -26,12 +28,13 @@ The example workflows are fake. No real money or payment provider is involved.
 
 ## Layout
 
-| Path              | What's there                                                                                                                                                                                                    |
-| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `workflowEngine/` | The generic engine: workers, the registry and the `WorkflowStore` interface, with Postgres in `src/stores/postgres/`. Knows nothing about HTTP or any specific workflow. What it promises is in `guarantees.md` |
-| `api/`            | HTTP API for clients. Reads tables directly, makes every state change through the engine, and exports its response types from `src/api.types.ts`                                                                |
-| `workflows/`      | Workflow definitions, the list of them, and the process entry points                                                                                                                                            |
-| `client/`         | Dashboard: runs list and live diagram, driven only by the HTTP API                                                                                                                                              |
+| Path              | What's there                                                                                                                                                                                                                              |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `workflowEngine/` | The generic engine: workers, the orchestrator, leases, the registry and the `WorkflowStore` interface, with Postgres in `src/stores/postgres/`. Knows nothing about HTTP or any specific workflow. What it promises is in `guarantees.md` |
+| `api/`            | HTTP API for clients. Reads tables directly, makes every state change through the engine, and exports its response types from `src/api.types.ts`                                                                                          |
+| `workflows/`      | Workflow definitions, the list of them, and the process entry points: `api.ts`, `worker.ts` and `orchestrator.ts`                                                                                                                         |
+| `client/`         | Dashboard: runs list and live diagram, driven only by the HTTP API                                                                                                                                                                        |
+| `docs/`           | Walkthroughs of how the engine works, for newcomers: `how-the-engine-works-v2.md` describes the current engine, and `how-the-engine-works-v1.md` the original design before leases                                                        |
 
 ## Add a workflow
 

@@ -15,6 +15,7 @@ const SCHEMA = fileURLToPath(new URL("../src/stores/postgres/schema.sql", import
 export const store = createPostgresStore();
 
 const workers: ChildProcess[] = [];
+const workerIds = new Map<ChildProcess, string>();
 
 /** Recreates the test database from the Postgres store's schema.sql. */
 async function resetDatabase() {
@@ -35,13 +36,20 @@ export async function startWorkers(count: number) {
   await resetDatabase();
   await createWorkflowEngine({ workflows, store }).sync();
   for (let i = 1; i <= count; i++) {
-    workers.push(
-      spawn(process.execPath, ["--import", "tsx", WORKER], {
-        env: { ...process.env, WORKER_ID: `test-worker-${i}` },
-        stdio: ["ignore", "ignore", "inherit"],
-      }),
-    );
+    const worker = spawn(process.execPath, ["--import", "tsx", WORKER], {
+      env: { ...process.env, WORKER_ID: `test-worker-${i}` },
+      stdio: ["ignore", "ignore", "inherit"],
+    });
+    workers.push(worker);
+    workerIds.set(worker, `test-worker-${i}`);
   }
+}
+
+/** Sends a signal to one worker process, found by its WORKER_ID. */
+export function signalWorker(workerId: string, signal: NodeJS.Signals) {
+  const worker = workers.find((w) => workerIds.get(w) === workerId);
+  if (!worker) throw new Error(`No worker ${workerId}`);
+  worker.kill(signal);
 }
 
 /** Shuts down the workers and closes the database connection. */
