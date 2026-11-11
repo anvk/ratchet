@@ -2,8 +2,6 @@
 
 Here's the whole engine from the ground up, using one example throughout: the fake **payment** workflow.
 
-New since [v1](how-the-engine-works-v1.md): steps have **leases**, workers send **heartbeats**, and an **orchestrator** gives a step to another worker when its worker goes silent. Sections 7 and 8 are new; the rest is v1 with those ideas added where they fit.
-
 ---
 
 ## 1. The big idea

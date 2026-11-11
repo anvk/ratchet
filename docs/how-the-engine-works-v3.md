@@ -2,8 +2,6 @@
 
 Here's the whole engine from the ground up, using one example throughout: the fake **payment** workflow.
 
-New since [v2](how-the-engine-works-v2.md): a failed step is **retried** after a growing wait, a step can fail for good with a **`NonRetryableError`**, and every step has a **limit on attempts**. Section 10 is new, and section 11 now shows the double charge retries can cause, and its fix; the rest is v2 with those ideas added where they fit. ([v1](how-the-engine-works-v1.md) is the original design.)
-
 ---
 
 ## 1. The big idea
