@@ -24,6 +24,9 @@ export function fetchRuns(status: WorkflowRunStatus | "all", cursor: string | nu
   return api.get<RunsResponse>(`/runs?${params}`);
 }
 
+/** Resumes a failed run from the steps that didn't succeed. */
+export const redriveRun = (id: string) => api.post<StartRunResponse>(`/runs/${id}/redrive`, {});
+
 /** Returns a run and its steps. */
 export const fetchRun = (id: string) => api.get<RunDetail>(`/runs/${id}`);
 

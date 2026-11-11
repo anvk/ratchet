@@ -53,6 +53,7 @@ export interface StepRuns {
   needs: Generated<string[]>;
   output: Json | null;
   position: number;
+  prior_attempts: Generated<number>;
   ready_at: Timestamp | null;
   run_id: string;
   started_at: Timestamp | null;

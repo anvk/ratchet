@@ -76,12 +76,18 @@ interface FlakyInput {
   final?: boolean;
 }
 
-/** A step that fails its first few attempts, with quick retries. */
+/** A step that fails its first few attempts, with quick retries, between two plain steps. */
 export const flaky = defineWorkflow<FlakyInput>({
   name: "flaky",
   title: "Flaky",
   description: "Fails a set number of times, then succeeds.",
   steps: [
+    {
+      name: "prepare",
+      title: "Prepare",
+      description: "Succeeds at once, so a redrive must not run it again.",
+      run: async () => ({ prepared: true }),
+    },
     {
       name: "call",
       title: "Call",

@@ -1,7 +1,12 @@
 // Safe to import in a browser: this file only imports constants and types. The
 // client uses it through "@ratchet/engine/utils".
 
-import { FINISHED_RUN_STATUSES, type WorkflowRunStatus } from "./workflowEngine.constants.ts";
+import {
+  FINISHED_RUN_STATUSES,
+  REDRIVABLE_FAILURE_REASONS,
+  type FailureReason,
+  type WorkflowRunStatus,
+} from "./workflowEngine.constants.ts";
 import type { StepDefaults, WorkflowEngineSettings } from "./workflowEngine.types.ts";
 
 /** Throws if a name appears more than once. `what` labels the error message. */
@@ -35,6 +40,15 @@ export function retryDelayMs({
 export function stepDefaults(settings: WorkflowEngineSettings): StepDefaults {
   const { leaseMs, maxAttempts, backoffMs, maxBackoffMs } = settings;
   return { leaseMs, maxAttempts, backoffMs, maxBackoffMs };
+}
+
+/** Whether a run failed in a way that redriving it could fix. */
+export function canRedrive(status: WorkflowRunStatus, failureReason: FailureReason | null) {
+  return (
+    status === "failed" &&
+    failureReason !== null &&
+    REDRIVABLE_FAILURE_REASONS.includes(failureReason)
+  );
 }
 
 /** Whether a run has stopped for good, either way. */

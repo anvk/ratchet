@@ -102,9 +102,15 @@ export interface RunDetail {
 }
 
 /**
+ * `POST /runs/:id/redrive` resumes a failed run from the steps that didn't
+ * succeed, and returns `{ id }` like starting a run. `404` if the run doesn't
+ * exist, `409` if it didn't fail for a reason in REDRIVABLE_FAILURE_REASONS.
+ */
+
+/**
  * One entry in a run's history. `type` is one of `run_queued`, `run_started`,
  * `run_succeeded`, `run_failed`, `step_ready`, `step_claimed`, `step_succeeded`,
- * `step_failed`, `step_skipped`, `step_cancelled`, `step_lease_expired` or
+ * `step_failed`, `step_skipped`, `step_cancelled`, `step_lease_expired`, `run_redriven` or
  * `step_retry_scheduled`.
  */
 export interface RunEvent {

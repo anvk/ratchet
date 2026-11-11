@@ -191,6 +191,12 @@ export interface WorkflowStore {
     retryInMs: number | null;
     failureReason: FailureReason | null;
   }>;
+  /**
+   * Resumes a run that failed for a reason in REDRIVABLE_FAILURE_REASONS, from
+   * the steps that didn't succeed, with fresh attempts. Succeeded steps keep
+   * their outputs. Returns false, changing nothing, for any other run.
+   */
+  redriveRun(request: { runId: string }): Promise<boolean>;
   /** Releases connections or file handles. */
   close(): Promise<void>;
 }
@@ -247,6 +253,8 @@ export interface WorkflowEngine {
     input?: unknown;
     idempotencyKey?: string;
   }): Promise<string>;
+  /** Resumes a failed run from the steps that didn't succeed. See WorkflowStore.redriveRun. */
+  redriveRun(runId: string): Promise<boolean>;
   /** Runs a worker until the engine is closed. */
   runWorker(options?: { workerId?: string }): Promise<void>;
   /**

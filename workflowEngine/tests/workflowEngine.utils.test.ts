@@ -6,6 +6,7 @@ import { DEFAULT_ENGINE_SETTINGS, WORKFLOW_RUN_STATUSES } from "../src/workflowE
 import {
   ancestors,
   assertUnique,
+  canRedrive,
   isRunFinished,
   resolveNeeds,
   retryDelayMs,
@@ -121,4 +122,13 @@ test("stepDepths uses the furthest step needed", () => {
     { name: "c", needs: ["a", "b"] },
   ];
   assert.deepEqual(Object.fromEntries(stepDepths(uneven)), { a: 0, b: 1, c: 2 });
+});
+
+test("canRedrive allows failures that a fix could cure, not decisions", () => {
+  assert.equal(canRedrive("failed", "attempts_exhausted"), true);
+  assert.equal(canRedrive("failed", "lost_worker"), true);
+  assert.equal(canRedrive("failed", "unknown_step"), true);
+  assert.equal(canRedrive("failed", "non_retryable"), false);
+  assert.equal(canRedrive("succeeded", null), false);
+  assert.equal(canRedrive("running", null), false);
 });

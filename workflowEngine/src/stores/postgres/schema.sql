@@ -91,6 +91,10 @@ CREATE TABLE step_runs (
   -- Copied from the plan, so a step added at runtime can have needs too.
   needs       text[] NOT NULL DEFAULT '{}',
   attempt     int  NOT NULL DEFAULT 0,
+  -- Attempts made before the run was last redriven. Attempt numbers never go
+  -- back, so a worker from before can't match a new attempt; maxAttempts
+  -- counts only the attempts after this.
+  prior_attempts int NOT NULL DEFAULT 0,
   worker_id   text,
   output      jsonb,
   error       text,

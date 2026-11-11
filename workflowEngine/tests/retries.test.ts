@@ -135,3 +135,45 @@ test("a step that keeps losing its lease fails its run after maxAttempts", async
   assert.equal(step.error, "Lost its worker on attempt 2 of 2");
   assert.equal((await eventsOf(runId, "step_lease_expired")).length, 2);
 });
+
+/** How many times a run's step was claimed. */
+const claimsOf = async (runId: string, stepName: string) =>
+  (
+    await db
+      .selectFrom("events")
+      .select("id")
+      .where("run_id", "=", runId)
+      .where("type", "=", "step_claimed")
+      .where("step_name", "=", stepName)
+      .execute()
+  ).length;
+
+test("redriving a run that ran out of attempts resumes it from the failed step", async () => {
+  // Attempts 1 to 5 fail: 4 before the redrive, then 1 of its fresh 4.
+  const runId = await store.startRun({ definition: flaky, input: { failures: 5 } });
+  await waitForFinish([runId]);
+  assert.equal((await outcome(runId, "call")).runReason, "attempts_exhausted");
+
+  assert.equal(await store.redriveRun({ runId }), true);
+  await waitForFinish([runId]);
+
+  const { run, runReason, step } = await outcome(runId, "call");
+  assert.equal(run, "succeeded");
+  assert.equal(runReason, null);
+  assert.equal(step.attempt, 6, "attempt numbers carry on, so old workers can't match");
+  assert.deepEqual(step.output, { attempt: 6 });
+  assert.equal(await claimsOf(runId, "prepare"), 1, "a step that succeeded doesn't run again");
+  assert.equal((await outcome(runId, "after")).step.status, "succeeded");
+  assert.equal((await eventsOf(runId, "run_redriven")).length, 1);
+});
+
+test("a run that failed on a decision, or didn't fail, can't be redriven", async () => {
+  const declined = await store.startRun({ definition: flaky, input: { final: true } });
+  const fine = await store.startRun({ definition: flaky, input: {} });
+  await waitForFinish([declined, fine]);
+
+  assert.equal(await store.redriveRun({ runId: declined }), false);
+  assert.equal(await store.redriveRun({ runId: fine }), false);
+  assert.equal((await outcome(declined, "call")).run, "failed");
+  assert.equal((await eventsOf(declined, "run_redriven")).length, 0);
+});
