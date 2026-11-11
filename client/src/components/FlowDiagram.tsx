@@ -1,20 +1,22 @@
 import { Handle, Position, ReactFlow, type Edge, type Node, type NodeProps } from "@xyflow/react";
-import type { StepRunStatus } from "@ratchet/engine/constants";
 import type { Step } from "@ratchet/api/types";
-import { STEP_STATUS_LABELS } from "../constants/statuses";
+import { STEP_STATUS_LABELS, type StepDisplayStatus } from "../constants/statuses";
+import { stepDisplayStatus } from "../utils/steps";
 
-const ICONS: Record<StepRunStatus, string> = {
+const ICONS: Record<StepDisplayStatus, string> = {
   pending: "○",
   ready: "○",
+  retrying: "↻",
   running: "◌",
   succeeded: "✓",
   failed: "✕",
   skipped: "–",
 };
 
-const COLORS: Record<StepRunStatus, string> = {
+const COLORS: Record<StepDisplayStatus, string> = {
   pending: "border-grey bg-grey-soft text-grey",
   ready: "border-grey bg-grey-soft text-grey",
+  retrying: "border-amber bg-amber-soft text-amber",
   running: "border-blue bg-blue-soft text-blue animate-pulse-soft motion-reduce:animate-none",
   succeeded: "border-green bg-green-soft text-green",
   failed: "border-red bg-red-soft text-red",
@@ -24,22 +26,23 @@ const COLORS: Record<StepRunStatus, string> = {
 type StepNode = Node<{ step: Step; selected: boolean }, "step">;
 
 function StepCard({ data: { step, selected } }: NodeProps<StepNode>) {
+  const status = stepDisplayStatus(step);
   return (
     <div
-      className={`w-52.5 cursor-pointer rounded-lg border-[1.5px] px-3 py-2.5 transition-colors duration-250 ${COLORS[step.status]} ${selected ? "outline-2 outline-offset-2 outline-accent" : ""}`}
+      className={`w-52.5 cursor-pointer rounded-lg border-[1.5px] px-3 py-2.5 transition-colors duration-250 ${COLORS[status]} ${selected ? "outline-2 outline-offset-2 outline-accent" : ""}`}
       title={step.description ?? undefined}
     >
       <Handle type="target" position={Position.Left} isConnectable={false} />
       <div className="flex items-center gap-1.75 font-semibold">
         <span className="w-3.5 text-center" aria-hidden>
-          {ICONS[step.status]}
+          {ICONS[status]}
         </span>
         <span className={step.status === "skipped" ? "line-through" : ""}>{step.title}</span>
       </div>
       <div className="mt-0.5 text-xs/normal">
-        {STEP_STATUS_LABELS[step.status]}
+        {STEP_STATUS_LABELS[status]}
         {step.worker_id ? ` · ${step.worker_id}` : ""}
-        {/* A step runs again after its worker loses the lease. */}
+        {/* A step runs again after a retryable error or a lost lease. */}
         {step.attempt > 1 ? ` · attempt ${step.attempt}` : ""}
       </div>
       <Handle type="source" position={Position.Right} isConnectable={false} />

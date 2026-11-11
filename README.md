@@ -11,8 +11,8 @@ pnpm dev
 ```
 
 Open <http://localhost:5173>, pick a workflow and press **Start run**. `pnpm dev` starts Postgres, the API, the orchestrator, three workers and the dashboard.
-How it all works is explained in [`docs/how-the-engine-works-v2.md`](docs/how-the-engine-works-v2.md)
-(the original design is in [v1](docs/how-the-engine-works-v1.md)).
+How it all works is explained in [`docs/how-the-engine-works-v3.md`](docs/how-the-engine-works-v3.md)
+(earlier designs: [v1](docs/how-the-engine-works-v1.md), [v2](docs/how-the-engine-works-v2.md)).
 
 ```sh
 pnpm test        # engine tests against real Postgres and worker processes
@@ -34,7 +34,7 @@ The example workflows are fake. No real money or payment provider is involved.
 | `api/`            | HTTP API for clients. Reads tables directly, makes every state change through the engine, and exports its response types from `src/api.types.ts`                                                                                          |
 | `workflows/`      | Workflow definitions, the list of them, and the process entry points: `api.ts`, `worker.ts` and `orchestrator.ts`                                                                                                                         |
 | `client/`         | Dashboard: runs list and live diagram, driven only by the HTTP API                                                                                                                                                                        |
-| `docs/`           | Walkthroughs of how the engine works, for newcomers: `how-the-engine-works-v2.md` describes the current engine, and `how-the-engine-works-v1.md` the original design before leases                                                        |
+| `docs/`           | Walkthroughs of how the engine works, for newcomers: `how-the-engine-works-v3.md` describes the current engine; `v1` (the original design) and `v2` (with leases) show how it got there                                                   |
 
 ## Add a workflow
 

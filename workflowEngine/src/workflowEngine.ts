@@ -22,8 +22,21 @@ export function defineWorkflow<Input = unknown>(
     `step in ${definition.name}`,
   );
   for (const step of definition.steps) {
+    const where = `Step ${definition.name}/${step.name}`;
     if (step.leaseMs !== undefined && !(Number.isInteger(step.leaseMs) && step.leaseMs > 0)) {
-      throw new Error(`Step ${definition.name}/${step.name} needs a whole, positive leaseMs`);
+      throw new Error(`${where} needs a whole, positive leaseMs`);
+    }
+    if (
+      step.maxAttempts !== undefined &&
+      !(Number.isInteger(step.maxAttempts) && step.maxAttempts > 0)
+    ) {
+      throw new Error(`${where} needs a whole, positive maxAttempts`);
+    }
+    if (
+      step.backoffMs !== undefined &&
+      !(Number.isInteger(step.backoffMs) && step.backoffMs >= 0)
+    ) {
+      throw new Error(`${where} needs a whole backoffMs of 0 or more`);
     }
   }
   return definition;

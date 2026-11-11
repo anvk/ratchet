@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { sql } from "kysely";
-import { createWorkflowEngine, defineWorkflow } from "../src/index.ts";
+import { createWorkflowEngine, defineWorkflow, type StepDefaults } from "../src/index.ts";
 import { db } from "../src/stores/postgres/index.ts";
 import { slow, workflows } from "./fixtures/workflows.ts";
 
@@ -24,6 +24,14 @@ after(async () => {
   await orchestrator.close();
   await stopWorkers();
 });
+
+/** Engine defaults for the tests that call the store directly, with a long lease. */
+const defaults: StepDefaults = {
+  leaseMs: 60_000,
+  maxAttempts: 3,
+  backoffMs: 1000,
+  maxBackoffMs: 30_000,
+};
 
 /** The "work" step of a run of the slow workflow. */
 const workStep = (runId: string) =>
@@ -123,7 +131,7 @@ test("a step's own leaseMs wins over the default, and the sticky handoff gets a 
     workerId: "test",
     workflowNames: [leased.name],
     order: "fair",
-    defaultLeaseMs: 60_000,
+    defaults,
   });
   assert.equal(claim?.leaseMs, 1234);
   assert.equal(await leaseLength("own"), 1234);
@@ -132,7 +140,7 @@ test("a step's own leaseMs wins over the default, and the sticky handoff gets a 
     claim: claim!,
     output: 1,
     claimNext: true,
-    defaultLeaseMs: 60_000,
+    defaults,
   });
   assert.equal(next?.stepName, "default");
   assert.equal(next?.leaseMs, 60_000);
@@ -152,7 +160,7 @@ test("a swept step can't be renewed or finished by the worker that lost it", asy
     workerId: "test",
     workflowNames: [lost.name],
     order: "fair",
-    defaultLeaseMs: 60_000,
+    defaults,
   });
   assert.ok(claim);
   assert.equal(await store.extendLease(claim), true);
@@ -163,7 +171,7 @@ test("a swept step can't be renewed or finished by the worker that lost it", asy
     .where("id", "=", claim.stepRunId)
     .execute();
   // The orchestrator may sweep it first, which is just as good.
-  await store.sweepExpiredLeases();
+  await store.sweepExpiredLeases({ defaults });
 
   const step = await db
     .selectFrom("step_runs")
@@ -176,7 +184,7 @@ test("a swept step can't be renewed or finished by the worker that lost it", asy
     claim,
     output: "late",
     claimNext: false,
-    defaultLeaseMs: 60_000,
+    defaults,
   });
   assert.equal(completed, false);
   assert.equal((await eventsOf(runId, "step_lease_expired")).length, 1);

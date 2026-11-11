@@ -4,8 +4,10 @@ import { Link, useParams } from "react-router-dom";
 import { isRunFinished } from "@ratchet/engine/utils";
 import { fetchEvents, fetchRun } from "../services/workflows.service";
 import type { Step } from "@ratchet/api/types";
-import { formatDuration } from "../utils/format";
+import { FAILURE_REASON_LABELS } from "../constants/statuses";
+import { stepDisplayStatus } from "../utils/steps";
 import { FlowDiagram } from "../components/FlowDiagram";
+import { Elapsed } from "../components/Elapsed";
 import { EventPill } from "../components/EventPill";
 import { StatusBadge } from "../components/StatusBadge";
 import { StepStatusBadge } from "../components/StepStatusBadge";
@@ -21,19 +23,26 @@ function StepDetail({ step }: { step: Step }) {
       <dl className="grid grid-cols-[80px_minmax(0,1fr)] gap-x-3 gap-y-1.5 [&_dt]:text-muted">
         <dt>Status</dt>
         <dd>
-          <StepStatusBadge status={step.status} />
+          <StepStatusBadge status={stepDisplayStatus(step)} />
         </dd>
+        {step.failure_reason && (
+          <>
+            <dt>Reason</dt>
+            <dd>{FAILURE_REASON_LABELS[step.failure_reason]}</dd>
+          </>
+        )}
         <dt>Attempt</dt>
         <dd>{step.attempt || "–"}</dd>
         <dt>Worker</dt>
         <dd className="font-mono text-[13px]">{step.worker_id ?? "–"}</dd>
         <dt>Duration</dt>
         <dd className="font-mono text-[13px]">
-          {formatDuration(step.started_at, step.finished_at)}
+          <Elapsed start={step.started_at} end={step.finished_at} />
         </dd>
         {step.error && (
           <>
-            <dt>Error</dt>
+            {/* While retrying, the error is the last attempt's, not the step's result. */}
+            <dt>{step.status === "failed" ? "Error" : "Last error"}</dt>
             <dd className="text-red">{step.error}</dd>
           </>
         )}
@@ -98,8 +107,13 @@ export function RunPage() {
         </h1>
         <div className="flex items-center gap-2.5">
           <StatusBadge status={run.status} />
+          {run.failure_reason && (
+            <span className="text-[13px] text-muted">
+              {FAILURE_REASON_LABELS[run.failure_reason]}
+            </span>
+          )}
           <span className="font-mono text-[13px]">
-            {formatDuration(run.started_at, run.finished_at)}
+            <Elapsed start={run.started_at} end={run.finished_at} />
           </span>
         </div>
       </div>

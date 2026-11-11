@@ -9,6 +9,14 @@ import pg from "pg";
 
 export type Outcome = "clear" | "insufficient-funds" | "risk-declined" | "sanctions-match";
 
+/**
+ * A decision against the payment, such as insufficient funds. Trying again
+ * would give the same answer, unlike a timeout, which might pass.
+ */
+export class PaymentDeclined extends Error {
+  override name = "PaymentDeclined";
+}
+
 /** Stands in for the outside world: how slow it is, and what it decides. */
 export interface Simulation {
   /** Force a result instead of leaving it to chance. */
@@ -132,7 +140,7 @@ export async function validateAccount({
   );
   const forced = simulation.forceOutcome;
   const insufficient = forced ? forced === "insufficient-funds" : amountCents > balanceCents;
-  if (insufficient) throw new Error("Insufficient funds");
+  if (insufficient) throw new PaymentDeclined("Insufficient funds");
   return { balanceCents };
 }
 
@@ -168,40 +176,63 @@ export async function scoreRisk({
     limitInSigmas,
     seed: Math.floor(simulation.random({ label: "simulation", min: 0, max: 2 ** 32 })),
   });
-  if (score > 85) throw new Error(`Risk score ${score}: declined`);
+  if (score > 85) throw new PaymentDeclined(`Risk score ${score}: declined`);
   return { score };
 }
 
-/** Checks both parties against a fake sanctions list, and throws on a match. */
-export async function screenSanctions({ simulation }: { simulation: Simulation }) {
+/**
+ * Checks both parties against a fake sanctions list, and throws on a match.
+ * The fake vendor is flaky: without a forced outcome, 15% of calls time out,
+ * which is worth retrying. `timesOut` forces a timeout.
+ */
+export async function screenSanctions({
+  simulation,
+  timesOut = false,
+}: {
+  simulation: Simulation;
+  timesOut?: boolean;
+}) {
   await pause({ simulation, minMs: 1000, maxMs: 4000 });
   const forced = simulation.forceOutcome;
+  const flaky = !forced && simulation.random({ label: "vendor", min: 0, max: 1 }) < 0.15;
+  if (timesOut || flaky) throw new Error("Sanctions vendor timed out");
   const match = forced
     ? forced === "sanctions-match"
     : simulation.random({ label: "sanctions", min: 0, max: 1 }) < 0.1;
-  if (match) throw new Error("Sanctions list match");
+  if (match) throw new PaymentDeclined("Sanctions list match");
   return { result: "clear" };
 }
 
-/** Writes matching debit and credit entries. One statement, so they are atomic. */
+/**
+ * Writes matching debit and credit entries. One statement, so they are atomic.
+ * Safe to repeat: posting a payment that's already posted changes nothing, so a
+ * retry can't charge twice.
+ *
+ * `responseTimesOut` makes the write succeed but then throw, like a ledger
+ * service whose reply never arrives: the caller can't tell it worked.
+ */
 export async function postLedger({
   paymentId,
   from,
   to,
   amountCents,
   simulation,
+  responseTimesOut = false,
 }: {
   paymentId: string;
   from: string;
   to: string;
   amountCents: number;
   simulation: Simulation;
+  responseTimesOut?: boolean;
 }) {
   await pause({ simulation, minMs: 500, maxMs: 1000 });
   await pool.query(
     `INSERT INTO ledger_entries (payment_id, account, direction, amount_cents)
-     VALUES ($1, $2, 'debit', $4), ($1, $3, 'credit', $4)`,
+     VALUES ($1, $2, 'debit', $4), ($1, $3, 'credit', $4)
+     ON CONFLICT (payment_id, direction) DO NOTHING`,
     [paymentId, from, to, amountCents],
   );
+  if (responseTimesOut) throw new Error("Ledger response timed out");
   return { posted: true };
 }

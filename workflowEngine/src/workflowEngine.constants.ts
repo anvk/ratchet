@@ -4,7 +4,11 @@
 import type { WorkflowRunStatus } from "./stores/postgres/db/schema.gen.ts";
 import type { WorkflowEngineSettings } from "./workflowEngine.types.ts";
 
-export type { StepRunStatus, WorkflowRunStatus } from "./stores/postgres/db/schema.gen.ts";
+export type {
+  FailureReason,
+  StepRunStatus,
+  WorkflowRunStatus,
+} from "./stores/postgres/db/schema.gen.ts";
 
 // A Record rather than an array: adding a status to the database enum becomes
 // a compile error here until it is listed.
@@ -38,4 +42,10 @@ export const DEFAULT_ENGINE_SETTINGS: WorkflowEngineSettings = {
   leaseMs: 30_000,
   /** Expired leases are swept every second, so a lost step waits at most a second longer. */
   sweepIntervalMs: 1000,
+  /** A step gets 3 tries in all: enough to ride out a blip, few enough to fail fast on a real bug. */
+  maxAttempts: 3,
+  /** Retries wait about 1s, then 2s, then 4s…, giving a struggling service time to recover. */
+  backoffMs: 1000,
+  /** No retry waits longer than 30s, so a step with many attempts doesn't stall for minutes. */
+  maxBackoffMs: 30_000,
 };

@@ -4,7 +4,7 @@
 //
 // Safe to import in a browser: this file only imports types.
 
-import type { StepRunStatus, WorkflowRunStatus } from "@ratchet/engine/constants";
+import type { FailureReason, StepRunStatus, WorkflowRunStatus } from "@ratchet/engine/constants";
 
 /** `400`, `404` and other errors. `issues` lists what was wrong with a malformed request. */
 export interface ErrorResponse {
@@ -40,6 +40,8 @@ export interface RunSummary {
   workflow: string;
   workflow_title: string;
   status: WorkflowRunStatus;
+  /** Why the run failed, from the step that failed it. Null unless failed. */
+  failure_reason: FailureReason | null;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
@@ -70,6 +72,8 @@ export interface Step {
   worker_id: string | null;
   output: unknown;
   error: string | null;
+  /** Why the step failed. Null unless failed. */
+  failure_reason: FailureReason | null;
   ready_at: string | null;
   started_at: string | null;
   finished_at: string | null;
@@ -88,7 +92,7 @@ export interface RunDetail {
 /**
  * One entry in a run's history. `type` is one of `run_queued`, `run_started`,
  * `run_succeeded`, `run_failed`, `step_ready`, `step_claimed`, `step_succeeded`,
- * `step_failed`, `step_skipped` or `step_lease_expired`.
+ * `step_failed`, `step_skipped`, `step_lease_expired` or `step_retry_scheduled`.
  */
 export interface RunEvent {
   id: string;

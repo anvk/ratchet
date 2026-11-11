@@ -23,6 +23,7 @@ export async function listRuns({
       "w.name as workflow",
       "w.title as workflow_title",
       "r.status",
+      "r.failure_reason",
       "r.created_at",
       "r.started_at",
       "r.finished_at",
@@ -89,6 +90,7 @@ export async function getRun(id: string) {
     .select([
       "r.id",
       "r.status",
+      "r.failure_reason",
       "r.input",
       "r.created_at",
       "r.started_at",
@@ -116,6 +118,7 @@ export async function getRun(id: string) {
       "sr.worker_id",
       "sr.output",
       "sr.error",
+      "sr.failure_reason",
       "sr.ready_at",
       "sr.started_at",
       "sr.finished_at",
