@@ -10,7 +10,7 @@ import {
   type Outcome,
 } from "./payment.service.ts";
 
-interface PaymentInput {
+export interface PaymentInput {
   amountCents?: number;
   /** Force a result instead of leaving it to chance. */
   forceOutcome?: Outcome;
@@ -56,21 +56,6 @@ export default defineWorkflow<PaymentInput>({
   title: "Process a payment",
   description:
     "Takes a fake payment through account checks, runs the risk and sanctions checks side by side, then posts it to the ledger.",
-  presets: [
-    { label: "Random payment", input: {} },
-    { label: "Payment clears", input: { forceOutcome: "clear" } },
-    { label: "Insufficient funds", input: { forceOutcome: "insufficient-funds" } },
-    { label: "Declined by risk score", input: { forceOutcome: "risk-declined" } },
-    { label: "Sanctions match", input: { forceOutcome: "sanctions-match" } },
-    {
-      label: "Risk check overloads its worker",
-      input: { forceOutcome: "clear", overloadRisk: true },
-    },
-    { label: "Flaky sanctions vendor", input: { forceOutcome: "clear", vendorTimeouts: 2 } },
-    // Times out on all 4 attempts screen-sanctions gets, so the run gives up.
-    { label: "Sanctions vendor down", input: { forceOutcome: "clear", vendorTimeouts: 4 } },
-    { label: "Ledger write times out", input: { forceOutcome: "clear", ledgerTimeout: true } },
-  ],
   steps: [
     {
       name: "receive-payment",

@@ -12,12 +12,22 @@ export interface ErrorResponse {
   issues?: unknown[];
 }
 
+/**
+ * A ready-made input the dashboard offers when starting a workflow. Not part of
+ * the engine: the app serving the API passes presets in, by workflow name.
+ */
+export interface Preset<Input extends object = object> {
+  label: string;
+  input: Input;
+}
+
 /** A workflow that can be started, from the registry. `GET /workflows` */
 export interface WorkflowInfo {
   name: string;
   title: string;
   description: string;
-  presets: { label: string; input: object }[];
+  /** Empty if the app gave none for this workflow. */
+  presets: Preset[];
   steps: { name: string; title: string; description: string }[];
 }
 

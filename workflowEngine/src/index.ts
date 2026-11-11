@@ -10,7 +10,6 @@ export type {
   Claim,
   ClaimOrder,
   FinalFailure,
-  Preset,
   Registry,
   StepDefaults,
   StepContext,

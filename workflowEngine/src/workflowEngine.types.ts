@@ -59,19 +59,12 @@ export interface StepDefinition<Input = any> {
   run(ctx: StepContext<Input>): Promise<unknown>;
 }
 
-/** A named input the dashboard offers when starting a run. */
-export interface Preset {
-  label: string;
-  input: object;
-}
-
 /** A workflow as its author writes it, passed to defineWorkflow. */
 export interface WorkflowDefinition<Input = any> {
   /** Stable identifier, unique within the registry. */
   name: string;
   title: string;
   description: string;
-  presets?: Preset[];
   /** Each step is listed after the steps it needs. */
   steps: StepDefinition<Input>[];
 }
