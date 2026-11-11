@@ -108,7 +108,7 @@ const engine = createWorkflowEngine({ workflows: [stockReport], store: createPos
 
 // Once per deploy: save each workflow's plan, so runs can be started.
 await engine.sync();
-const runId = await engine.startRun({ definition: stockReport, input: { ticker: "AAPL" } });
+const runId = await engine.startRun({ workflow: "stock-report", input: { ticker: "AAPL" } });
 
 // In a worker process: claim and run steps until stopped.
 closeOnSignals(engine);

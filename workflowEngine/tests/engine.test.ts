@@ -3,9 +3,14 @@ import { startWorkers, stopWorkers, store, waitForFinish } from "./harness.ts";
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
-import { createWorkflowEngine, DEFAULT_ENGINE_SETTINGS, defineWorkflow } from "../src/index.ts";
+import {
+  createWorkflowEngine,
+  DEFAULT_ENGINE_SETTINGS,
+  defineWorkflow,
+  UnknownWorkflowError,
+} from "../src/index.ts";
 import { db } from "../src/stores/postgres/index.ts";
-import { pipeline } from "./fixtures/workflows.ts";
+import { pipeline, workflows } from "./fixtures/workflows.ts";
 
 before(() => startWorkers(6));
 after(() => stopWorkers());
@@ -208,4 +213,31 @@ test("editing a workflow leaves earlier runs on the version they started with", 
 
   assert.equal((await stepTitle(oldRun)).title, "Before");
   assert.equal((await stepTitle(newRun)).title, "After");
+});
+
+test("engine.startRun starts a run by workflow name, and rejects a name it doesn't have", async () => {
+  const engine = createWorkflowEngine({ workflows, store });
+  const runId = await engine.startRun({ workflow: "pipeline", input: {} });
+  await waitForFinish([runId]);
+  const run = await db
+    .selectFrom("workflow_runs as r")
+    .innerJoin("workflows as w", "w.id", "r.workflow_id")
+    .select(["w.name", "r.status"])
+    .where("r.id", "=", runId)
+    .executeTakeFirstOrThrow();
+  assert.deepEqual(run, { name: "pipeline", status: "succeeded" });
+
+  const { count: before } = await db
+    .selectFrom("workflow_runs")
+    .select((eb) => eb.fn.countAll<string>().as("count"))
+    .executeTakeFirstOrThrow();
+  await assert.rejects(
+    engine.startRun({ workflow: "no-such-workflow", input: {} }),
+    (err) => err instanceof UnknownWorkflowError && err.workflow === "no-such-workflow",
+  );
+  const { count: after } = await db
+    .selectFrom("workflow_runs")
+    .select((eb) => eb.fn.countAll<string>().as("count"))
+    .executeTakeFirstOrThrow();
+  assert.equal(after, before, "an unknown name creates no run");
 });
