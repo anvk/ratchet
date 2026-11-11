@@ -1,14 +1,10 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { canRedrive } from "@ratchet/engine/utils";
-import { QUERY_KEYS } from "../queryKeys";
+import { useRedriveRun } from "../hooks/mutations/useRedriveRun";
+import { useRun } from "../hooks/queries/useRun";
+import { useRunEvents } from "../hooks/queries/useRunEvents";
 import { isRunFinished } from "../utils/runs";
-import {
-  fetchEvents,
-  fetchRun,
-  redriveRun,
-} from "../services/workflows.service";
 import type { Step } from "@ratchet/api/types";
 import { FAILURE_REASON_LABELS } from "../constants/statuses";
 import { stepDisplayStatus } from "../utils/steps";
@@ -26,9 +22,7 @@ function StepDetail({ step }: { step: Step }) {
   return (
     <Panel>
       <h2 className="mb-3 font-semibold">{step.title}</h2>
-      {step.description && (
-        <p className="-mt-1.5 mb-3 text-muted">{step.description}</p>
-      )}
+      {step.description && <p className="-mt-1.5 mb-3 text-muted">{step.description}</p>}
       <dl className="grid grid-cols-[80px_minmax(0,1fr)] gap-x-3 gap-y-1.5 [&_dt]:text-muted">
         <dt>Status</dt>
         <dd>
@@ -69,35 +63,10 @@ export function RunPage() {
   const { id = "" } = useParams();
   const [picked, setPicked] = useState<string | null>(null);
 
-  const { data, error } = useQuery({
-    queryKey: QUERY_KEYS.runs.details({ id }),
-    queryFn: () => fetchRun(id),
-    retry: false,
-    // Finished runs can't change, so stop polling them.
-    refetchInterval: (query) => {
-      if (query.state.error) return false;
-      const status = query.state.data?.run.status;
-      return status && isRunFinished(status) ? false : 500;
-    },
-  });
-
+  const { data, error } = useRun({ id });
   const finished = data ? isRunFinished(data.run.status) : false;
-  const { data: events } = useQuery({
-    queryKey: QUERY_KEYS.runs.events({ id, finished }),
-    queryFn: () => fetchEvents(id),
-    enabled: !!data,
-    refetchInterval: finished ? false : 500,
-  });
-
-  const queryClient = useQueryClient();
-  const redrive = useMutation({
-    mutationFn: () => redriveRun(id),
-    // The run is running again, so start polling it and its history.
-    onSuccess: () =>
-      queryClient.invalidateQueries({
-        queryKey: QUERY_KEYS.runs.details({ id }),
-      }),
-  });
+  const { data: events } = useRunEvents({ id, finished, enabled: !!data });
+  const redrive = useRedriveRun({ id });
 
   if (error) {
     return (
@@ -112,8 +81,7 @@ export function RunPage() {
   const { run, steps } = data;
   const active = steps.find((s) => s.status === "running");
   const failed = steps.find((s) => s.status === "failed");
-  const selected =
-    steps.find((s) => s.name === picked) ?? active ?? failed ?? steps.at(-1)!;
+  const selected = steps.find((s) => s.name === picked) ?? active ?? failed ?? steps.at(-1)!;
 
   return (
     <>
@@ -123,9 +91,7 @@ export function RunPage() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-[22px] font-semibold">
           {run.workflow_title}{" "}
-          <span className="font-mono text-[13px] text-muted">
-            {run.id.slice(0, 8)}
-          </span>
+          <span className="font-mono text-[13px] text-muted">{run.id.slice(0, 8)}</span>
         </h1>
         <div className="flex items-center gap-2.5">
           <StatusBadge status={run.status} />
@@ -150,17 +116,11 @@ export function RunPage() {
         </div>
       </div>
       {redrive.error && (
-        <ErrorMessage>
-          Could not resume this run: {redrive.error.message}
-        </ErrorMessage>
+        <ErrorMessage>Could not resume this run: {redrive.error.message}</ErrorMessage>
       )}
       <p className="mt-0.5 mb-4 text-muted">{run.workflow_description}</p>
 
-      <FlowDiagram
-        steps={steps}
-        selected={selected.name}
-        onSelect={setPicked}
-      />
+      <FlowDiagram steps={steps} selected={selected.name} onSelect={setPicked} />
 
       <div className="mt-4 grid grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)] gap-4 max-[720px]:grid-cols-1">
         <StepDetail step={selected} />
@@ -168,18 +128,13 @@ export function RunPage() {
           <h2 className="mb-3 font-semibold">Events</h2>
           <ol>
             {events?.map((event) => (
-              <li
-                key={event.id}
-                className="flex flex-wrap items-center gap-x-3 gap-y-0.5 py-0.75"
-              >
+              <li key={event.id} className="flex flex-wrap items-center gap-x-3 gap-y-0.5 py-0.75">
                 <time className="font-mono text-[13px] text-muted">
                   {new Date(event.at).toLocaleTimeString()}
                 </time>
                 <EventPill type={event.type} />
                 <span className="text-muted">
-                  {[event.step_name, event.worker_id]
-                    .filter(Boolean)
-                    .join(" · ")}
+                  {[event.step_name, event.worker_id].filter(Boolean).join(" · ")}
                 </span>
               </li>
             ))}
