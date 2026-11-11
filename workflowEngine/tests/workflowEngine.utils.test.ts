@@ -2,17 +2,15 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { DEFAULT_ENGINE_SETTINGS, WORKFLOW_RUN_STATUSES } from "../src/workflowEngine.constants.ts";
+import { DEFAULT_ENGINE_SETTINGS } from "../src/workflowEngine.constants.ts";
 import {
   ancestors,
   assertUnique,
   canRedrive,
   dependents,
-  isRunFinished,
   resolveNeeds,
   retryDelayMs,
   stepDefaults,
-  stepDepths,
 } from "../src/workflowEngine.utils.ts";
 
 test("assertUnique accepts names that are all different", () => {
@@ -31,11 +29,6 @@ test("assertUnique names the first duplicate and what it is", () => {
 
 test("assertUnique compares names exactly", () => {
   assert.doesNotThrow(() => assertUnique(["Step", "step", "step "], "step"));
-});
-
-test("isRunFinished is true only for succeeded and failed", () => {
-  const finished = WORKFLOW_RUN_STATUSES.filter(isRunFinished);
-  assert.deepEqual(finished.sort(), ["failed", "succeeded"]);
 });
 
 test("retryDelayMs doubles from backoffMs on each attempt", () => {
@@ -104,25 +97,6 @@ test("ancestors includes steps needed through other steps", () => {
 test("ancestors leaves out steps running side by side", () => {
   assert.deepEqual([...ancestors(diamond, "risk")].sort(), ["receive", "validate"]);
   assert.equal(ancestors(diamond, "receive").size, 0);
-});
-
-test("stepDepths puts parallel steps at the same depth", () => {
-  assert.deepEqual(Object.fromEntries(stepDepths(diamond)), {
-    receive: 0,
-    validate: 1,
-    risk: 2,
-    sanctions: 2,
-    ledger: 3,
-  });
-});
-
-test("stepDepths uses the furthest step needed", () => {
-  const uneven = [
-    { name: "a", needs: [] },
-    { name: "b", needs: ["a"] },
-    { name: "c", needs: ["a", "b"] },
-  ];
-  assert.deepEqual(Object.fromEntries(stepDepths(uneven)), { a: 0, b: 1, c: 2 });
 });
 
 test("canRedrive allows failures that a fix could cure, not decisions", () => {

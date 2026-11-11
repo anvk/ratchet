@@ -22,4 +22,4 @@ export type {
 } from "./workflowEngine.types.ts";
 export { closeOnSignals, createWorkflowEngine, defineWorkflow } from "./workflowEngine.ts";
 export { NonRetryableError } from "./workflowEngine.errors.ts";
-export { canRedrive, isRunFinished } from "./workflowEngine.utils.ts";
+export { canRedrive } from "./workflowEngine.utils.ts";

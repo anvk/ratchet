@@ -2,7 +2,6 @@
 // client uses it through "@ratchet/engine/utils".
 
 import {
-  FINISHED_RUN_STATUSES,
   REDRIVABLE_FAILURE_REASONS,
   type FailureReason,
   type WorkflowRunStatus,
@@ -51,11 +50,6 @@ export function canRedrive(status: WorkflowRunStatus, failureReason: FailureReas
   );
 }
 
-/** Whether a run has stopped for good, either way. */
-export function isRunFinished(status: WorkflowRunStatus) {
-  return FINISHED_RUN_STATUSES.includes(status);
-}
-
 /** A step's name and what it needs, as far as the order of steps goes. */
 export interface StepLink {
   name: string;
@@ -97,23 +91,4 @@ export function ancestors(steps: StepLink[], name: string): Set<string> {
  */
 export function dependents(steps: StepLink[], name: string): Set<string> {
   return new Set(steps.filter((s) => ancestors(steps, s.name).has(name)).map((s) => s.name));
-}
-
-/**
- * How far each step is from the start: 0 for a step that needs nothing, else
- * one more than the furthest step it needs. Steps at the same depth can run
- * side by side, so the dashboard lays them out in one column.
- */
-export function stepDepths(steps: StepLink[]): Map<string, number> {
-  const depths = new Map<string, number>();
-  const depthOf = (step: StepLink): number => {
-    const known = depths.get(step.name);
-    if (known !== undefined) return known;
-    const needed = step.needs.map((n) => steps.find((s) => s.name === n));
-    const depth = Math.max(-1, ...needed.map((s) => (s ? depthOf(s) : -1))) + 1;
-    depths.set(step.name, depth);
-    return depth;
-  };
-  for (const step of steps) depthOf(step);
-  return depths;
 }

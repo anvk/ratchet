@@ -1,6 +1,6 @@
 import { Handle, Position, ReactFlow, type Edge, type Node, type NodeProps } from "@xyflow/react";
 import type { Step } from "@ratchet/api/types";
-import { stepDepths } from "@ratchet/engine/utils";
+import { stepDepths } from "../utils/steps";
 import { STEP_STATUS_LABELS, type StepDisplayStatus } from "../constants/statuses";
 import { stepDisplayStatus } from "../utils/steps";
 
