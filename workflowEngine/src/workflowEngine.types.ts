@@ -248,9 +248,13 @@ export interface WorkflowEngine {
   readonly settings: WorkflowEngineSettings;
   /** Saves this engine's workflows to its store. Call before starting runs. */
   sync(): Promise<void>;
-  /** Starts a run. See WorkflowStore.startRun. */
+  /**
+   * Starts a run of one of this engine's workflows, by name, and returns its
+   * id. Throws UnknownWorkflowError, creating nothing, for any other name. See
+   * WorkflowStore.startRun for idempotencyKey.
+   */
   startRun(request: {
-    definition: WorkflowDefinition;
+    workflow: string;
     input?: unknown;
     idempotencyKey?: string;
   }): Promise<string>;

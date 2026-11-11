@@ -6,6 +6,7 @@ import type {
   WorkflowEngineSettings,
   WorkflowStore,
 } from "./workflowEngine.types.ts";
+import { UnknownWorkflowError } from "./workflowEngine.errors.ts";
 import { assertUnique } from "./workflowEngine.utils.ts";
 import { runOrchestrator } from "./workflowEngine.orchestrator.ts";
 import { runWorker } from "./workflowEngine.worker.ts";
@@ -101,7 +102,11 @@ export function createWorkflowEngine({
     registry,
     settings: resolved,
     sync: () => store.syncWorkflows(workflows),
-    startRun: (request) => store.startRun(request),
+    startRun({ workflow, input, idempotencyKey }) {
+      const definition = registry.get(workflow);
+      if (!definition) return Promise.reject(new UnknownWorkflowError(workflow));
+      return store.startRun({ definition, input, idempotencyKey });
+    },
     redriveRun: (runId) => store.redriveRun({ runId }),
     runWorker: ({ workerId } = {}) =>
       track(runWorker({ registry, store, settings: resolved, stopSignal: stop.signal, workerId })),

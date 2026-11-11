@@ -1,4 +1,4 @@
-import type { WorkflowEngine } from "@ratchet/engine";
+import { UnknownWorkflowError, type WorkflowEngine } from "@ratchet/engine";
 import type { FastifyInstance } from "fastify";
 import type {
   ErrorResponse,
@@ -18,18 +18,19 @@ import { listRunsQuery, runParams, startRunBody } from "./runs.schemas.ts";
 export function runsRoutes(app: FastifyInstance, engine: WorkflowEngine) {
   app.post("/runs", async (req, reply) => {
     const { workflow, input, idempotency_key } = startRunBody.parse(req.body);
-    const definition = engine.registry.get(workflow);
-    if (!definition) {
-      const body: ErrorResponse = { error: "Unknown workflow" };
+    try {
+      const id = await engine.startRun({
+        workflow,
+        input: input ?? {},
+        idempotencyKey: idempotency_key,
+      });
+      const body: StartRunResponse = { id };
+      return reply.code(201).send(body);
+    } catch (err) {
+      if (!(err instanceof UnknownWorkflowError)) throw err;
+      const body: ErrorResponse = { error: err.message };
       return reply.code(400).send(body);
     }
-    const id = await engine.startRun({
-      definition,
-      input: input ?? {},
-      idempotencyKey: idempotency_key,
-    });
-    const body: StartRunResponse = { id };
-    return reply.code(201).send(body);
   });
 
   app.get("/runs", async (req): Promise<RunsResponse> =>

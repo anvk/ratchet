@@ -6,3 +6,14 @@
 export class NonRetryableError extends Error {
   override name = "NonRetryableError";
 }
+
+/** Thrown by startRun for a name that isn't one of the engine's workflows. No run is created. */
+export class UnknownWorkflowError extends Error {
+  override name = "UnknownWorkflowError";
+  readonly workflow: string;
+
+  constructor(workflow: string) {
+    super(`Unknown workflow: ${workflow}`);
+    this.workflow = workflow;
+  }
+}
