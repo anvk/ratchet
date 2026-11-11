@@ -1,5 +1,5 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import { defineWorkflow, NonRetryableError } from "../../src/index.ts";
+import { defineWorkflow, NonRetryableError, type StepContext } from "../../src/index.ts";
 
 interface PipelineInput {
   /** Name of the step that should throw. */
@@ -76,12 +76,18 @@ interface FlakyInput {
   final?: boolean;
 }
 
-/** A step that fails its first few attempts, with quick retries. */
+/** A step that fails its first few attempts, with quick retries, between two plain steps. */
 export const flaky = defineWorkflow<FlakyInput>({
   name: "flaky",
   title: "Flaky",
   description: "Fails a set number of times, then succeeds.",
   steps: [
+    {
+      name: "prepare",
+      title: "Prepare",
+      description: "Succeeds at once, so a redrive must not run it again.",
+      run: async () => ({ prepared: true }),
+    },
     {
       name: "call",
       title: "Call",
@@ -128,4 +134,56 @@ export const doomed = defineWorkflow({
   ],
 });
 
-export const workflows = [pipeline, slow, flaky, doomed];
+interface DiamondInput {
+  /** How long each branch takes, so the two finish at about the same moment. */
+  branchMs?: number;
+  /** A branch that fails for good, after branchMs. */
+  failBranch?: "left" | "right";
+  /** How long the other branch takes when one fails, so it's still running. */
+  survivorMs?: number;
+}
+
+/** A branch step: waits (stopping early if it loses its lease), then reports what it could see. */
+function branch(name: "left" | "right") {
+  return {
+    name,
+    title: name,
+    description: `Runs alongside the other branch.`,
+    needs: ["start"],
+    async run(ctx: StepContext<DiamondInput>) {
+      const { failBranch, branchMs = 50, survivorMs } = ctx.input;
+      const ms = failBranch && failBranch !== name ? (survivorMs ?? branchMs) : branchMs;
+      await sleep(ms, undefined, { signal: ctx.signal });
+      if (failBranch === name) throw new NonRetryableError(`${name} failed`);
+      return { seen: Object.keys(ctx.outputs).sort() };
+    },
+  };
+}
+
+/** start, then left and right side by side, then join once both are done. tail only needs right. */
+export const diamond = defineWorkflow<DiamondInput>({
+  name: "diamond",
+  title: "Diamond",
+  description: "Two branches that meet again.",
+  steps: [
+    { name: "start", title: "start", description: "Runs first.", run: async () => ({ n: 1 }) },
+    branch("left"),
+    branch("right"),
+    {
+      name: "join",
+      title: "join",
+      description: "Needs both branches.",
+      needs: ["left", "right"],
+      run: async (ctx) => ({ seen: Object.keys(ctx.outputs).sort() }),
+    },
+    {
+      name: "tail",
+      title: "tail",
+      description: "Only needs right, so it runs even if left fails.",
+      needs: ["right"],
+      run: async (ctx) => ({ seen: Object.keys(ctx.outputs).sort() }),
+    },
+  ],
+});
+
+export const workflows = [pipeline, slow, flaky, doomed, diamond];

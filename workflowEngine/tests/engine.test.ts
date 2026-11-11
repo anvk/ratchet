@@ -148,11 +148,36 @@ test("workers only claim steps from workflows they know", async () => {
 
   const claim = await store.claimStep({
     workerId: "other-engine",
-    workflowNames: [foreign.name],
+    workflows: [foreign],
     order: "fair",
     defaults: { ...DEFAULT_ENGINE_SETTINGS, leaseMs: 30_000 },
   });
   assert.equal(claim?.runId, runId);
+});
+
+test("workers only claim runs of a workflow version they have", async () => {
+  // Same name, edited plan: like a run started by a newer deploy.
+  const edited = { ...pipeline, title: "Pipeline, edited" };
+  await store.syncWorkflows([edited]);
+  const runId = await store.startRun({ definition: edited });
+
+  // The running workers have the original pipeline, so they leave it alone.
+  await sleep(300);
+  const run = await db
+    .selectFrom("workflow_runs")
+    .select("status")
+    .where("id", "=", runId)
+    .executeTakeFirstOrThrow();
+  assert.equal(run.status, "queued");
+
+  const claim = await store.claimStep({
+    workerId: "newer-deploy",
+    workflows: [edited],
+    order: "fair",
+    defaults: { ...DEFAULT_ENGINE_SETTINGS, leaseMs: 30_000 },
+  });
+  assert.equal(claim?.runId, runId);
+  await db.deleteFrom("workflow_runs").where("id", "=", runId).execute();
 });
 
 test("editing a workflow leaves earlier runs on the version they started with", async () => {

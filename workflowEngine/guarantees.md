@@ -5,6 +5,10 @@ What the engine promises. Each guarantee is backed by a test in
 
 - **One worker holds a step at a time.** Competing workers never claim the same
   step at once.
+- **A worker only runs steps it has the same code for.** A run belongs to the
+  workflow version it started on, and workers only claim runs of versions they
+  have. During a deploy, old workers finish old runs and new workers take new
+  ones.
 - **A step whose worker disappears runs again.** Each claim comes with a lease,
   which the worker renews with heartbeats while the step runs. When a lease
   expires (the worker crashed, froze or lost its connection), the orchestrator
@@ -15,7 +19,15 @@ What the engine promises. Each guarantee is backed by a test in
   no longer match.
 - **A step's lease is its own `leaseMs`, or the engine's default.** This holds
   for every claim, including the sticky handoff to the next step.
-- **Steps run in order.** A step becomes ready only after the one before it succeeds.
+- **A step starts only once everything it needs has succeeded.** Its `needs`,
+  or the step listed before it. Steps whose needs are met run side by side.
+- **A step that needs several others is readied exactly once,** even when they
+  finish at the same moment on different workers: every change to a started
+  run's steps locks the run first, so they take turns.
+- **A step only sees the outputs of steps it depends on,** directly or through
+  others, never those of a step running alongside it.
+- **A step can only need steps listed before it,** so a workflow can't have
+  unknown names or loops; `defineWorkflow` rejects them.
 - **A failed step is retried, from where it failed.** A step that throws runs
   again after a backoff (`backoffMs`, doubling each time, capped at
   `maxBackoffMs`, spread by up to 20%), while it has attempts left. Steps that
@@ -27,8 +39,15 @@ What the engine promises. Each guarantee is backed by a test in
 - **Every step has a limit on attempts.** Its own `maxAttempts`, or the
   engine's default. Errors and lost leases both use up attempts, so a step that
   keeps crashing its worker stops too.
-- **A step that runs out of attempts ends the run.** The step is final, later
-  steps become `skipped`, and the run becomes `failed`.
+- **A step that fails for good only stops what depends on it.** Steps that
+  depend on it, directly or not, become `skipped`. Every other step carries
+  on: running steps finish and ready steps still start. Once nothing can move,
+  the run becomes `failed`, with the reason of the step that failed first.
+- **A failed run can be resumed if a fix could cure it.** Redriving a run that
+  failed with `attempts_exhausted`, `lost_worker` or `unknown_step` reruns the
+  steps that didn't succeed, with fresh attempts; steps that succeeded keep
+  their outputs. Attempt numbers keep counting up, so a worker from before
+  can't save over a new attempt. `non_retryable` runs can't be redriven.
 - **Every failed step and run records why.** `failure_reason` is set exactly
   when the status is `failed` (a database check enforces it): `non_retryable`,
   `attempts_exhausted`, `lost_worker` or `unknown_step`.
@@ -41,6 +60,7 @@ What the engine promises. Each guarantee is backed by a test in
 - **Workers pick steps by the engine's claim order.**
   - `sticky` (default): a worker that finishes a step takes the run's next step
     in the same transaction, so a run stays on one worker from start to finish.
+    When several steps become ready at once, it takes the first.
   - `fair`: the step that has been ready the longest goes first, so runs take
     turns.
   - `oldest-run-first`: steps from the oldest run go first.
@@ -51,8 +71,11 @@ What the engine promises. Each guarantee is backed by a test in
   something and then failed (or its reply was lost), the retry writes it again,
   unless the step makes its side effects safe to repeat, for example with a
   unique key or `ctx.idempotencyKey`.
-- **A run that failed for good can't be resumed.** It has to be started again
-  from the beginning.
+- **A failed run ends only when its last running step does,** since steps
+  that don't depend on the failure finish first.
+- **A version covers the plan, not the code.** Editing only the code inside a
+  step's `run` doesn't create a new version, so workers with either code
+  claim the same runs.
 - **Lost leases are only recovered while an orchestrator is running.** Without
   one, steps whose lease expired stay `running`.
 - **A step that blocks the event loop for longer than its lease loses it,**

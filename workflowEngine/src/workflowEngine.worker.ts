@@ -29,7 +29,9 @@ function startHeartbeat({
       .extendLease(claim)
       .then((owned) => {
         if (owned || lost.signal.aborted) return;
-        console.log(`[${workerId}] ${claim.stepName} lost its lease (attempt ${claim.attempt})`);
+        console.log(
+          `[${workerId}] ${claim.stepName} is no longer this worker's (attempt ${claim.attempt})`,
+        );
         clearInterval(timer);
         lost.abort();
       })
@@ -120,7 +122,7 @@ async function executeStep({
 /** Logs a result the store refused because another worker took the step over. */
 function logRejected({ workerId, claim }: { workerId: string; claim: Claim }) {
   console.log(
-    `[${workerId}] ${claim.stepName} result rejected: attempt ${claim.attempt} lost its lease`,
+    `[${workerId}] ${claim.stepName} result rejected: attempt ${claim.attempt} no longer owns the step`,
   );
 }
 
@@ -140,7 +142,7 @@ export async function runWorker({
 }) {
   const { pollMs, errorBackoffMs, claimOrder } = settings;
   const defaults = stepDefaults(settings);
-  const workflowNames = [...registry.keys()];
+  const workflows = [...registry.values()];
 
   /** Waits, but wakes up as soon as the worker is told to stop. */
   const wait = (ms: number) => sleep(ms, undefined, { signal: stopSignal }).catch(() => {});
@@ -153,7 +155,7 @@ export async function runWorker({
     try {
       let claim = await store.claimStep({
         workerId,
-        workflowNames,
+        workflows,
         order: claimOrder,
         defaults,
       });

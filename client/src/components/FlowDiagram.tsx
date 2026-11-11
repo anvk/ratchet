@@ -1,5 +1,6 @@
 import { Handle, Position, ReactFlow, type Edge, type Node, type NodeProps } from "@xyflow/react";
 import type { Step } from "@ratchet/api/types";
+import { stepDepths } from "../utils/steps";
 import { STEP_STATUS_LABELS, type StepDisplayStatus } from "../constants/statuses";
 import { stepDisplayStatus } from "../utils/steps";
 
@@ -22,6 +23,10 @@ const COLORS: Record<StepDisplayStatus, string> = {
   failed: "border-red bg-red-soft text-red",
   skipped: "border-grey border-dashed bg-grey-soft text-grey",
 };
+
+/** Space between columns and between cards stacked in one column, in pixels. */
+const COLUMN_WIDTH = 260;
+const ROW_HEIGHT = 90;
 
 type StepNode = Node<{ step: Step; selected: boolean }, "step">;
 
@@ -61,23 +66,34 @@ export function FlowDiagram({
   selected: string | null;
   onSelect: (name: string) => void;
 }) {
-  // Steps run in order, so they're laid out in a row by position.
-  const nodes: StepNode[] = steps.map((step) => ({
-    id: step.name,
-    type: "step",
-    position: { x: step.position * 260, y: 0 },
-    data: { step, selected: step.name === selected },
-  }));
+  // One column per depth, so steps that can run side by side are stacked,
+  // centred on the same line as the steps before and after them.
+  const depths = stepDepths(steps);
+  const columns = new Map<number, Step[]>();
+  for (const step of steps) {
+    const depth = depths.get(step.name) ?? 0;
+    columns.set(depth, [...(columns.get(depth) ?? []), step]);
+  }
+  const nodes: StepNode[] = [...columns].flatMap(([depth, column]) =>
+    column.map((step, row) => ({
+      id: step.name,
+      type: "step",
+      position: { x: depth * COLUMN_WIDTH, y: (row - (column.length - 1) / 2) * ROW_HEIGHT },
+      data: { step, selected: step.name === selected },
+    })),
+  );
 
-  const edges: Edge[] = steps.slice(1).map((step, i) => ({
-    id: `${steps[i].name}-${step.name}`,
-    source: steps[i].name,
-    target: step.name,
-    animated: step.status === "running",
-  }));
+  const edges: Edge[] = steps.flatMap((step) =>
+    step.needs.map((need) => ({
+      id: `${need}-${step.name}`,
+      source: need,
+      target: step.name,
+      animated: step.status === "running",
+    })),
+  );
 
   return (
-    <div className="h-47.5 rounded-lg border border-line bg-surface">
+    <div className="h-60 rounded-lg border border-line bg-surface">
       <ReactFlow
         nodes={nodes}
         edges={edges}

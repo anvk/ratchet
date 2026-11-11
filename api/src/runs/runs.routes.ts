@@ -47,6 +47,23 @@ export function runsRoutes(app: FastifyInstance, engine: WorkflowEngine) {
     return body;
   });
 
+  // Through the engine too: resuming a run changes its steps and writes events.
+  app.post("/runs/:id/redrive", async (req, reply) => {
+    const { id } = runParams.parse(req.params);
+    if (!(await getRun(id))) {
+      const body: ErrorResponse = { error: "Run not found" };
+      return reply.code(404).send(body);
+    }
+    if (!(await engine.redriveRun(id))) {
+      const body: ErrorResponse = {
+        error: "Only a run that failed for a redrivable reason can be redriven",
+      };
+      return reply.code(409).send(body);
+    }
+    const body: StartRunResponse = { id };
+    return body;
+  });
+
   app.get("/runs/:id/events", async (req): Promise<EventsResponse> => {
     const { id } = runParams.parse(req.params);
     return toJson({ events: await listRunEvents(id) });

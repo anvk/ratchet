@@ -50,8 +50,10 @@ export interface StepRuns {
   id: Generated<string>;
   lease_expires_at: Timestamp | null;
   name: string;
+  needs: Generated<string[]>;
   output: Json | null;
   position: number;
+  prior_attempts: Generated<number>;
   ready_at: Timestamp | null;
   run_id: string;
   started_at: Timestamp | null;
@@ -67,6 +69,7 @@ export interface Steps {
   lease_ms: number | null;
   max_attempts: number | null;
   name: string;
+  needs: Generated<string[]>;
   position: number;
   title: string;
   workflow_id: string;

@@ -10,7 +10,7 @@ import {
   type Outcome,
 } from "./payment.service.ts";
 
-interface PaymentInput {
+export interface PaymentInput {
   amountCents?: number;
   /** Force a result instead of leaving it to chance. */
   forceOutcome?: Outcome;
@@ -46,6 +46,8 @@ function simulationFor(ctx: StepContext<PaymentInput>) {
     key: `${ctx.runId}:${ctx.stepName}:${ctx.attempt}`,
     forceOutcome: ctx.input.forceOutcome,
     timeScale: ctx.input.timeScale,
+    // If the step is no longer this worker's, stop waiting on the "vendor".
+    signal: ctx.signal,
   });
 }
 
@@ -53,22 +55,7 @@ export default defineWorkflow<PaymentInput>({
   name: "payment",
   title: "Process a payment",
   description:
-    "Takes a fake payment through account, risk and sanctions checks, then posts it to the ledger.",
-  presets: [
-    { label: "Random payment", input: {} },
-    { label: "Payment clears", input: { forceOutcome: "clear" } },
-    { label: "Insufficient funds", input: { forceOutcome: "insufficient-funds" } },
-    { label: "Declined by risk score", input: { forceOutcome: "risk-declined" } },
-    { label: "Sanctions match", input: { forceOutcome: "sanctions-match" } },
-    {
-      label: "Risk check overloads its worker",
-      input: { forceOutcome: "clear", overloadRisk: true },
-    },
-    { label: "Flaky sanctions vendor", input: { forceOutcome: "clear", vendorTimeouts: 2 } },
-    // Times out on all 4 attempts screen-sanctions gets, so the run gives up.
-    { label: "Sanctions vendor down", input: { forceOutcome: "clear", vendorTimeouts: 4 } },
-    { label: "Ledger write times out", input: { forceOutcome: "clear", ledgerTimeout: true } },
-  ],
+    "Takes a fake payment through account checks, runs the risk and sanctions checks side by side, then posts it to the ledger.",
   steps: [
     {
       name: "receive-payment",
@@ -97,6 +84,7 @@ export default defineWorkflow<PaymentInput>({
       name: "score-risk",
       title: "Score risk",
       description: "Runs a Monte Carlo simulation and declines payments that score above 85.",
+      needs: ["validate-account"],
       // A risk check blocks its worker for 3 to 4.5 seconds, so no heartbeat can
       // run until it ends. 10 seconds is twice the slowest normal check, and
       // recovers a stuck one sooner than the engine's 30-second default.
@@ -115,6 +103,8 @@ export default defineWorkflow<PaymentInput>({
       title: "Screen sanctions",
       description:
         "Checks both parties against a fake government sanctions list. The vendor sometimes times out, so it's retried.",
+      // Doesn't need the risk score, so it runs alongside the risk check.
+      needs: ["validate-account"],
       // A flaky vendor gets more tries, starting half a second apart.
       maxAttempts: 4,
       backoffMs: 500,
@@ -130,6 +120,9 @@ export default defineWorkflow<PaymentInput>({
       name: "post-ledger",
       title: "Post to ledger",
       description: "Writes matching debit and credit entries.",
+      // Waits for both checks. Its amount comes from receive-payment, which it
+      // depends on through them.
+      needs: ["score-risk", "screen-sanctions"],
       run: (ctx) =>
         postLedger({
           ...ctx.outputs["receive-payment"],

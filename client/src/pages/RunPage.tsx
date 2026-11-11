@@ -1,12 +1,15 @@
-import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { isRunFinished } from "@ratchet/engine/utils";
-import { fetchEvents, fetchRun } from "../services/workflows.service";
+import { canRedrive } from "@ratchet/engine/utils";
+import { useRedriveRun } from "../hooks/mutations/useRedriveRun";
+import { useRun } from "../hooks/queries/useRun";
+import { useRunEvents } from "../hooks/queries/useRunEvents";
+import { isRunFinished } from "../utils/runs";
 import type { Step } from "@ratchet/api/types";
 import { FAILURE_REASON_LABELS } from "../constants/statuses";
 import { stepDisplayStatus } from "../utils/steps";
 import { FlowDiagram } from "../components/FlowDiagram";
+import { Button } from "../components/Button";
 import { Elapsed } from "../components/Elapsed";
 import { EventPill } from "../components/EventPill";
 import { StatusBadge } from "../components/StatusBadge";
@@ -60,25 +63,10 @@ export function RunPage() {
   const { id = "" } = useParams();
   const [picked, setPicked] = useState<string | null>(null);
 
-  const { data, error } = useQuery({
-    queryKey: ["run", id],
-    queryFn: () => fetchRun(id),
-    retry: false,
-    // Finished runs can't change, so stop polling them.
-    refetchInterval: (query) => {
-      if (query.state.error) return false;
-      const status = query.state.data?.run.status;
-      return status && isRunFinished(status) ? false : 500;
-    },
-  });
-
+  const { data, error } = useRun({ id });
   const finished = data ? isRunFinished(data.run.status) : false;
-  const { data: events } = useQuery({
-    queryKey: ["events", id, finished],
-    queryFn: () => fetchEvents(id),
-    enabled: !!data,
-    refetchInterval: finished ? false : 500,
-  });
+  const { data: events } = useRunEvents({ id, finished, enabled: !!data });
+  const redrive = useRedriveRun({ id });
 
   if (error) {
     return (
@@ -115,8 +103,21 @@ export function RunPage() {
           <span className="font-mono text-[13px]">
             <Elapsed start={run.started_at} end={run.finished_at} />
           </span>
+          {canRedrive(run.status, run.failure_reason) && (
+            <Button
+              variant="primary"
+              disabled={redrive.isPending}
+              onClick={() => redrive.mutate()}
+              title="Runs the steps that didn't succeed again, with fresh attempts. Steps that succeeded keep their results."
+            >
+              Resume from failed step
+            </Button>
+          )}
         </div>
       </div>
+      {redrive.error && (
+        <ErrorMessage>Could not resume this run: {redrive.error.message}</ErrorMessage>
+      )}
       <p className="mt-0.5 mb-4 text-muted">{run.workflow_description}</p>
 
       <FlowDiagram steps={steps} selected={selected.name} onSelect={setPicked} />

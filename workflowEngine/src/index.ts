@@ -1,6 +1,7 @@
 export {
   DEFAULT_ENGINE_SETTINGS,
   FINISHED_RUN_STATUSES,
+  REDRIVABLE_FAILURE_REASONS,
   WORKFLOW_RUN_STATUSES,
   type FailureReason,
   type StepRunStatus,
@@ -10,7 +11,6 @@ export type {
   Claim,
   ClaimOrder,
   FinalFailure,
-  Preset,
   Registry,
   StepDefaults,
   StepContext,
@@ -22,4 +22,4 @@ export type {
 } from "./workflowEngine.types.ts";
 export { closeOnSignals, createWorkflowEngine, defineWorkflow } from "./workflowEngine.ts";
 export { NonRetryableError } from "./workflowEngine.errors.ts";
-export { isRunFinished } from "./workflowEngine.utils.ts";
+export { canRedrive } from "./workflowEngine.utils.ts";

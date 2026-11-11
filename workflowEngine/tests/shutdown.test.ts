@@ -40,6 +40,7 @@ function fakeStore() {
     },
     failStep: async () => ({ recorded: true, retryInMs: null, failureReason: "non_retryable" }),
     extendLease: async () => true,
+    redriveRun: async () => false,
     sweepExpiredLeases: async () => 0,
     close: async () => {
       calls.closed++;

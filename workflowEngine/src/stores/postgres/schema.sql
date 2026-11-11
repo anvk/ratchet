@@ -8,12 +8,12 @@
 CREATE TYPE workflow_run_status AS ENUM ('queued', 'running', 'succeeded', 'failed');
 
 CREATE TYPE step_run_status AS ENUM (
-  'pending',   -- an earlier step has not finished
+  'pending',   -- a step it needs has not finished
   'ready',     -- can be claimed now
   'running',
   'succeeded',
   'failed',
-  'skipped'
+  'skipped'    -- never started, because a step it depends on failed
 );
 
 -- Why a step, and so its run, failed. Statuses say what can happen next, and
@@ -45,6 +45,9 @@ CREATE TABLE steps (
   title       text NOT NULL,
   description text NOT NULL,
   position    int  NOT NULL,
+  -- Steps that must succeed before this one can start. They always come
+  -- earlier in position, so the steps can't form a loop.
+  needs       text[] NOT NULL DEFAULT '{}',
   -- How long a worker may go without a heartbeat before the step is given to
   -- another worker. Null means the engine's default.
   lease_ms    int  CHECK (lease_ms > 0),
@@ -84,7 +87,13 @@ CREATE TABLE step_runs (
   name        text NOT NULL,
   position    int  NOT NULL,
   status      step_run_status NOT NULL DEFAULT 'pending',
+  -- Copied from the plan, so a step added at runtime can have needs too.
+  needs       text[] NOT NULL DEFAULT '{}',
   attempt     int  NOT NULL DEFAULT 0,
+  -- Attempts made before the run was last redriven. Attempt numbers never go
+  -- back, so a worker from before can't match a new attempt; maxAttempts
+  -- counts only the attempts after this.
+  prior_attempts int NOT NULL DEFAULT 0,
   worker_id   text,
   output      jsonb,
   error       text,

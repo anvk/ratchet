@@ -12,12 +12,22 @@ export interface ErrorResponse {
   issues?: unknown[];
 }
 
+/**
+ * A ready-made input the dashboard offers when starting a workflow. Not part of
+ * the engine: the app serving the API passes presets in, by workflow name.
+ */
+export interface Preset<Input extends object = object> {
+  label: string;
+  input: Input;
+}
+
 /** A workflow that can be started, from the registry. `GET /workflows` */
 export interface WorkflowInfo {
   name: string;
   title: string;
   description: string;
-  presets: { label: string; input: object }[];
+  /** Empty if the app gave none for this workflow. */
+  presets: Preset[];
   steps: { name: string; title: string; description: string }[];
 }
 
@@ -67,6 +77,8 @@ export interface Step {
   /** Null for a step added at runtime, which has no plan row. */
   description: string | null;
   position: number;
+  /** Steps that must succeed before this one starts. */
+  needs: string[];
   status: StepRunStatus;
   attempt: number;
   worker_id: string | null;
@@ -90,9 +102,16 @@ export interface RunDetail {
 }
 
 /**
+ * `POST /runs/:id/redrive` resumes a failed run from the steps that didn't
+ * succeed, and returns `{ id }` like starting a run. `404` if the run doesn't
+ * exist, `409` if it didn't fail for a reason in REDRIVABLE_FAILURE_REASONS.
+ */
+
+/**
  * One entry in a run's history. `type` is one of `run_queued`, `run_started`,
  * `run_succeeded`, `run_failed`, `step_ready`, `step_claimed`, `step_succeeded`,
- * `step_failed`, `step_skipped`, `step_lease_expired` or `step_retry_scheduled`.
+ * `step_failed`, `step_skipped`, `step_lease_expired`, `run_redriven` or
+ * `step_retry_scheduled`.
  */
 export interface RunEvent {
   id: string;

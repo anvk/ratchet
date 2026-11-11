@@ -3,7 +3,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { defineWorkflow } from "@ratchet/engine";
 
-interface GreetingInput {
+export interface GreetingInput {
   name?: string;
   /** Multiplies waits. Tests use 0 to run instantly. */
   timeScale?: number;
@@ -13,10 +13,6 @@ export default defineWorkflow<GreetingInput>({
   name: "greeting",
   title: "Send a greeting",
   description: "A three-step example showing how little a new workflow needs.",
-  presets: [
-    { label: "Greet the world", input: { name: "world" } },
-    { label: "Greet nobody (fails)", input: { name: "" } },
-  ],
   steps: [
     {
       name: "choose-recipient",

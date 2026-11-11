@@ -1,7 +1,7 @@
 // Safe to import in a browser: this file only imports types. The client uses
 // it through "@ratchet/engine/constants".
 
-import type { WorkflowRunStatus } from "./stores/postgres/db/schema.gen.ts";
+import type { FailureReason, WorkflowRunStatus } from "./stores/postgres/db/schema.gen.ts";
 import type { WorkflowEngineSettings } from "./workflowEngine.types.ts";
 
 export type {
@@ -21,8 +21,19 @@ const workflowRunStatuses: Record<WorkflowRunStatus, true> = {
 
 export const WORKFLOW_RUN_STATUSES = Object.keys(workflowRunStatuses) as WorkflowRunStatus[];
 
-/** Statuses a run never leaves. */
+/** Statuses a run never leaves, unless a failed run is redriven. */
 export const FINISHED_RUN_STATUSES: readonly WorkflowRunStatus[] = ["succeeded", "failed"];
+
+/**
+ * Failures worth resuming once the cause is fixed: a service that was down, a
+ * worker that kept crashing, a step no worker had code for. Not non_retryable:
+ * asking again won't change a decision.
+ */
+export const REDRIVABLE_FAILURE_REASONS: readonly FailureReason[] = [
+  "attempts_exhausted",
+  "lost_worker",
+  "unknown_step",
+];
 
 /** The settings an engine uses for anything createWorkflowEngine isn't given. */
 export const DEFAULT_ENGINE_SETTINGS: WorkflowEngineSettings = {

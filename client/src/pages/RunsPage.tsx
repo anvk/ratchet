@@ -1,8 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { WORKFLOW_RUN_STATUSES, type WorkflowRunStatus } from "@ratchet/engine/constants";
-import { fetchRuns, fetchWorkflows, startRun } from "../services/workflows.service";
+import { useStartRuns } from "../hooks/mutations/useStartRuns";
+import { useRuns } from "../hooks/queries/useRuns";
+import { useWorkflows } from "../hooks/queries/useWorkflows";
 import { Age } from "../components/Age";
 import { Elapsed } from "../components/Elapsed";
 import { StatusBadge } from "../components/StatusBadge";
@@ -22,7 +23,6 @@ const RUN_COUNTS = [1, 5, 10, 25, 50];
 
 export function RunsPage() {
   const navigate = useNavigate();
-  const queryClient = useQueryClient();
   const [params] = useSearchParams();
   const requested = params.get("status") as WorkflowRunStatus | null;
   const tab: WorkflowRunStatus | "all" = requested && TABS.includes(requested) ? requested : "all";
@@ -32,31 +32,29 @@ export function RunsPage() {
   const [runCount, setRunCount] = useState(1);
   const cursor = cursors.at(-1) ?? null;
 
-  const { data, error } = useQuery({
-    queryKey: ["runs", tab, cursor],
-    queryFn: () => fetchRuns(tab, cursor),
-    refetchInterval: 2000,
-  });
-
-  const { data: workflows } = useQuery({ queryKey: ["workflows"], queryFn: fetchWorkflows });
+  const { data, error } = useRuns({ status: tab, cursor });
+  const { data: workflows } = useWorkflows();
   const workflow = workflows?.find((w) => w.name === workflowName) ?? workflows?.[0];
-
-  // One run opens its page. Several stay on the list, so they can be watched together.
-  const start = useMutation({
-    mutationFn: () => {
-      const input = workflow!.presets[presetIndex]?.input ?? {};
-      return Promise.all(Array.from({ length: runCount }, () => startRun(workflow!.name, input)));
-    },
-    onSuccess: (runs) => {
-      if (runs.length === 1) return navigate(URLS.runs.details({ id: runs[0].id }));
-      selectTab("all");
-      return queryClient.invalidateQueries({ queryKey: ["runs"] });
-    },
-  });
+  const start = useStartRuns();
 
   function selectTab(next: WorkflowRunStatus | "all") {
     setCursors([]);
     navigate(URLS.runs.list({ status: next === "all" ? undefined : next }));
+  }
+
+  function startRuns() {
+    if (!workflow) return;
+    const input = workflow.presets[presetIndex]?.input ?? {};
+    start.mutate(
+      { workflow: workflow.name, input, count: runCount },
+      {
+        // One run opens its page. Several stay on the list, so they can be watched together.
+        onSuccess: (runs) => {
+          if (runs.length === 1) navigate(URLS.runs.details({ id: runs[0].id }));
+          else selectTab("all");
+        },
+      },
+    );
   }
 
   const totalRuns = data ? Object.values(data.counts).reduce((a, b) => a + b, 0) : 0;
@@ -69,7 +67,7 @@ export function RunsPage() {
           className="flex flex-wrap items-center gap-2.5"
           onSubmit={(e) => {
             e.preventDefault();
-            start.mutate();
+            startRuns();
           }}
         >
           <label className="sr-only" htmlFor="workflow">
