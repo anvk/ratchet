@@ -4,10 +4,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DEFAULT_ENGINE_SETTINGS, WORKFLOW_RUN_STATUSES } from "../src/workflowEngine.constants.ts";
 import {
+  ancestors,
   assertUnique,
   isRunFinished,
+  resolveNeeds,
   retryDelayMs,
   stepDefaults,
+  stepDepths,
 } from "../src/workflowEngine.utils.ts";
 
 test("assertUnique accepts names that are all different", () => {
@@ -60,4 +63,62 @@ test("stepDefaults picks the step-related settings", () => {
     backoffMs: 1000,
     maxBackoffMs: 30_000,
   });
+});
+
+// receive → validate → (risk, sanctions) → ledger, like the payment workflow.
+const diamond = [
+  { name: "receive", needs: [] },
+  { name: "validate", needs: ["receive"] },
+  { name: "risk", needs: ["validate"] },
+  { name: "sanctions", needs: ["validate"] },
+  { name: "ledger", needs: ["risk", "sanctions"] },
+];
+
+test("resolveNeeds makes steps without needs run in order", () => {
+  assert.deepEqual(resolveNeeds([{ name: "a" }, { name: "b" }, { name: "c" }]), [
+    { name: "a", needs: [] },
+    { name: "b", needs: ["a"] },
+    { name: "c", needs: ["b"] },
+  ]);
+});
+
+test("resolveNeeds keeps needs that are given, including none", () => {
+  assert.deepEqual(resolveNeeds([{ name: "a" }, { name: "b", needs: [] }, { name: "c" }]), [
+    { name: "a", needs: [] },
+    { name: "b", needs: [] },
+    { name: "c", needs: ["b"] },
+  ]);
+});
+
+test("ancestors includes steps needed through other steps", () => {
+  assert.deepEqual([...ancestors(diamond, "ledger")].sort(), [
+    "receive",
+    "risk",
+    "sanctions",
+    "validate",
+  ]);
+});
+
+test("ancestors leaves out steps running side by side", () => {
+  assert.deepEqual([...ancestors(diamond, "risk")].sort(), ["receive", "validate"]);
+  assert.equal(ancestors(diamond, "receive").size, 0);
+});
+
+test("stepDepths puts parallel steps at the same depth", () => {
+  assert.deepEqual(Object.fromEntries(stepDepths(diamond)), {
+    receive: 0,
+    validate: 1,
+    risk: 2,
+    sanctions: 2,
+    ledger: 3,
+  });
+});
+
+test("stepDepths uses the furthest step needed", () => {
+  const uneven = [
+    { name: "a", needs: [] },
+    { name: "b", needs: ["a"] },
+    { name: "c", needs: ["a", "b"] },
+  ];
+  assert.deepEqual(Object.fromEntries(stepDepths(uneven)), { a: 0, b: 1, c: 2 });
 });

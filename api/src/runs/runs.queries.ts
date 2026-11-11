@@ -113,6 +113,7 @@ export async function getRun(id: string) {
       sql<string>`coalesce(s.title, sr.name)`.as("title"),
       "s.description",
       "sr.position",
+      "sr.needs",
       "sr.status",
       "sr.attempt",
       "sr.worker_id",

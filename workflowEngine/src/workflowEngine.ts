@@ -21,8 +21,16 @@ export function defineWorkflow<Input = unknown>(
     definition.steps.map((s) => s.name),
     `step in ${definition.name}`,
   );
-  for (const step of definition.steps) {
+  for (const [i, step] of definition.steps.entries()) {
     const where = `Step ${definition.name}/${step.name}`;
+    const earlier = definition.steps.slice(0, i).map((s) => s.name);
+    for (const need of step.needs ?? []) {
+      // Only earlier steps, which rules out unknown names, itself and loops at once.
+      if (!earlier.includes(need)) {
+        throw new Error(`${where} needs ${need}, which isn't a step listed before it`);
+      }
+    }
+    assertUnique(step.needs ?? [], `need in ${where}`);
     if (step.leaseMs !== undefined && !(Number.isInteger(step.leaseMs) && step.leaseMs > 0)) {
       throw new Error(`${where} needs a whole, positive leaseMs`);
     }

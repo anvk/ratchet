@@ -67,6 +67,8 @@ export interface Step {
   /** Null for a step added at runtime, which has no plan row. */
   description: string | null;
   position: number;
+  /** Steps that must succeed before this one starts. */
+  needs: string[];
   status: StepRunStatus;
   attempt: number;
   worker_id: string | null;
@@ -92,7 +94,8 @@ export interface RunDetail {
 /**
  * One entry in a run's history. `type` is one of `run_queued`, `run_started`,
  * `run_succeeded`, `run_failed`, `step_ready`, `step_claimed`, `step_succeeded`,
- * `step_failed`, `step_skipped`, `step_lease_expired` or `step_retry_scheduled`.
+ * `step_failed`, `step_skipped`, `step_cancelled`, `step_lease_expired` or
+ * `step_retry_scheduled`.
  */
 export interface RunEvent {
   id: string;

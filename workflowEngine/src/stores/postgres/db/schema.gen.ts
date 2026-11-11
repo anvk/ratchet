@@ -25,7 +25,7 @@ export type JsonPrimitive = boolean | number | string | null;
 
 export type JsonValue = JsonArray | JsonObject | JsonPrimitive;
 
-export type StepRunStatus = "failed" | "pending" | "ready" | "running" | "skipped" | "succeeded";
+export type StepRunStatus = "cancelled" | "failed" | "pending" | "ready" | "running" | "skipped" | "succeeded";
 
 export type Timestamp = ColumnType<Date, Date | string, Date | string>;
 
@@ -50,6 +50,7 @@ export interface StepRuns {
   id: Generated<string>;
   lease_expires_at: Timestamp | null;
   name: string;
+  needs: Generated<string[]>;
   output: Json | null;
   position: number;
   ready_at: Timestamp | null;
@@ -67,6 +68,7 @@ export interface Steps {
   lease_ms: number | null;
   max_attempts: number | null;
   name: string;
+  needs: Generated<string[]>;
   position: number;
   title: string;
   workflow_id: string;

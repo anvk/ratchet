@@ -12,7 +12,8 @@ import { stepDefaults } from "./workflowEngine.utils.ts";
 
 /**
  * Renews a claim's lease every third of it, until stopped. If a renewal finds
- * that this worker no longer owns the step, `signal` fires and renewals stop.
+ * that this worker no longer owns the step (its lease expired, or its run
+ * failed and cancelled it), `signal` fires and renewals stop.
  */
 function startHeartbeat({
   store,
@@ -29,7 +30,9 @@ function startHeartbeat({
       .extendLease(claim)
       .then((owned) => {
         if (owned || lost.signal.aborted) return;
-        console.log(`[${workerId}] ${claim.stepName} lost its lease (attempt ${claim.attempt})`);
+        console.log(
+          `[${workerId}] ${claim.stepName} is no longer this worker's (attempt ${claim.attempt})`,
+        );
         clearInterval(timer);
         lost.abort();
       })
@@ -117,10 +120,13 @@ async function executeStep({
   return next;
 }
 
-/** Logs a result the store refused because another worker took the step over. */
+/**
+ * Logs a result the store refused: the step's lease expired and another worker
+ * took it over, or its run failed and cancelled it.
+ */
 function logRejected({ workerId, claim }: { workerId: string; claim: Claim }) {
   console.log(
-    `[${workerId}] ${claim.stepName} result rejected: attempt ${claim.attempt} lost its lease`,
+    `[${workerId}] ${claim.stepName} result rejected: attempt ${claim.attempt} no longer owns the step`,
   );
 }
 

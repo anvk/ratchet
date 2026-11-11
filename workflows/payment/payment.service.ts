@@ -23,6 +23,8 @@ export interface Simulation {
   forceOutcome?: Outcome;
   /** Multiplies waits and simulation size. 0 runs instantly. */
   timeScale: number;
+  /** Ends waits early when it fires, like cancelling a network call. */
+  signal?: AbortSignal;
   /** A random-looking number in [min, max) that always repeats for the same label. */
   random(range: { label: string; min: number; max: number }): number;
 }
@@ -41,14 +43,17 @@ export function createSimulation({
   key,
   forceOutcome,
   timeScale = 1,
+  signal,
 }: {
   key: string;
   forceOutcome?: Outcome;
   timeScale?: number;
+  signal?: AbortSignal;
 }): Simulation {
   return {
     forceOutcome,
     timeScale,
+    signal,
     random({ label, min, max }) {
       const digest = createHash("sha256").update(`${key}:${label}`).digest();
       return min + (digest.readUInt32BE(0) / 2 ** 32) * (max - min);
@@ -56,7 +61,7 @@ export function createSimulation({
   };
 }
 
-/** Waits for a random time in the range, like a slow network call. */
+/** Waits for a random time in the range, like a slow network call. Throws if cancelled. */
 function pause({
   simulation,
   minMs,
@@ -68,6 +73,8 @@ function pause({
 }) {
   return sleep(
     simulation.random({ label: "pause", min: minMs, max: maxMs }) * simulation.timeScale,
+    undefined,
+    { signal: simulation.signal },
   );
 }
 

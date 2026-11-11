@@ -27,6 +27,7 @@ export const STEP_STATUS_LABELS: Record<StepDisplayStatus, string> = {
   succeeded: "Passed",
   failed: "Failed",
   skipped: "Skipped",
+  cancelled: "Cancelled",
 };
 
 /** Why a step or run failed, shown next to its Failed badge. */
@@ -54,4 +55,5 @@ export const STEP_STATUS_TONES: Record<StepDisplayStatus, PillTone> = {
   succeeded: "green",
   failed: "red",
   skipped: "grey",
+  cancelled: "grey",
 };

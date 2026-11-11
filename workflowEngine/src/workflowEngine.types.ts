@@ -7,7 +7,10 @@ export interface StepContext<Input = any> {
   attempt: number;
   /** The input the run was started with. */
   input: Input;
-  /** Outputs of earlier steps, by step name. */
+  /**
+   * Outputs of every step this one depends on, directly or through other
+   * steps, by step name. Steps running side by side never see each other's.
+   */
   outputs: Record<string, any>;
   /**
    * Stays the same across every attempt of this step. Pass it to anything with
@@ -28,6 +31,14 @@ export interface StepDefinition<Input = any> {
   name: string;
   title: string;
   description: string;
+  /**
+   * Steps that must succeed before this one starts. Steps whose needs are met
+   * run side by side. Defaults to the step listed before it, so steps without
+   * needs run in order; `[]` makes another starting step. A step can only need
+   * steps listed before it, which also means steps can't wait on each other in
+   * a loop.
+   */
+  needs?: string[];
   /**
    * How long a worker may go without a heartbeat before this step is given to
    * another worker. Defaults to the engine's leaseMs. Heartbeats come every
@@ -61,7 +72,7 @@ export interface WorkflowDefinition<Input = any> {
   title: string;
   description: string;
   presets?: Preset[];
-  /** Run in this order. */
+  /** Each step is listed after the steps it needs. */
   steps: StepDefinition<Input>[];
 }
 
@@ -72,7 +83,9 @@ export type Registry = Map<string, WorkflowDefinition>;
  * How workers choose their next step.
  *
  * - `sticky`: after finishing a step, a worker takes the next step of the same
- *   run, so a run goes start to finish on one worker. Otherwise like `fair`.
+ *   run, so a run goes start to finish on one worker. When several steps become
+ *   ready at once, it takes the first and leaves the rest to other workers.
+ *   Otherwise like `fair`.
  * - `fair`: the step that has been ready the longest, so runs take turns and
  *   move forward together.
  * - `oldest-run-first`: a step from the oldest run, on whichever worker is free.
@@ -87,7 +100,7 @@ export interface Claim {
   stepRunId: string;
   /** Used with the workflow name to find the step's code in the registry. */
   stepName: string;
-  /** Order within the run. Finishing a step makes position + 1 ready. */
+  /** Where the step is listed in the workflow. */
   position: number;
   /** Starts at 1. With workerId, proves this worker still owns the step. */
   attempt: number;
@@ -99,7 +112,7 @@ export interface Claim {
   workflow: string;
   /** The input the run was started with. */
   input: unknown;
-  /** Outputs of the steps that have already succeeded, by step name. */
+  /** Outputs of the steps this one depends on, directly or not, by step name. */
   outputs: Record<string, unknown>;
 }
 
@@ -124,7 +137,8 @@ export interface WorkflowStore {
   /** Saves each workflow's plan. Safe to repeat, and an edit creates a new version. */
   syncWorkflows(workflows: WorkflowDefinition[]): Promise<void>;
   /**
-   * Creates a run with its first step ready to claim, and returns the run's id.
+   * Creates a run with its starting steps (those that need nothing) ready to
+   * claim, and returns the run's id.
    * If the caller's idempotencyKey was already used, creates nothing and returns
    * the existing run's id.
    */
@@ -146,8 +160,10 @@ export interface WorkflowStore {
     defaults: StepDefaults;
   }): Promise<Claim | null>;
   /**
-   * Records success, then readies the next step or finishes the run. With
-   * claimNext, the next step goes straight to the same worker in the same
+   * Records success, then readies every step whose needs have now all
+   * succeeded, or finishes the run if nothing is left. Two steps finishing at
+   * once must ready a step that needs both exactly once. With claimNext, the
+   * first newly ready step goes straight to the same worker in the same
    * transaction, so no other worker can take it in between. `completed` is
    * false if the claim is stale.
    */
@@ -168,8 +184,9 @@ export interface WorkflowStore {
   /**
    * Records a failure. If `final` is null and the step has attempts left, the
    * step becomes ready again after a backoff (`retryInMs`). Otherwise it fails
-   * for good, with `failureReason` saying why: the remaining steps are skipped
-   * and the run fails. `recorded` is false if the claim is stale.
+   * for good, with `failureReason` saying why, and the run fails: steps that
+   * haven't started are skipped, and steps still running are cancelled, so
+   * their workers lose them. `recorded` is false if the claim is stale.
    */
   failStep(request: {
     claim: Claim;
