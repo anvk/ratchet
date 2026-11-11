@@ -3,9 +3,10 @@ import { useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { WORKFLOW_RUN_STATUSES, type WorkflowRunStatus } from "@ratchet/engine/constants";
 import { fetchRuns, fetchWorkflows, startRun } from "../services/workflows.service";
-import { formatAge, formatDuration } from "../utils/format";
+import { Age } from "../components/Age";
+import { Elapsed } from "../components/Elapsed";
 import { StatusBadge } from "../components/StatusBadge";
-import { RUN_STATUS_LABELS } from "../constants/statuses";
+import { FAILURE_REASON_LABELS, RUN_STATUS_LABELS } from "../constants/statuses";
 import { URLS } from "../urls";
 import { Button } from "../components/Button";
 import { ErrorMessage } from "../components/ErrorMessage";
@@ -190,13 +191,20 @@ export function RunsPage() {
                 <td className={CELL}>{run.workflow_title}</td>
                 <td className={CELL}>
                   <StatusBadge status={run.status} />
+                  {run.failure_reason && (
+                    <span className="ml-2 text-xs text-muted">
+                      {FAILURE_REASON_LABELS[run.failure_reason]}
+                    </span>
+                  )}
                 </td>
                 <td className={`${CELL} font-mono text-[13px]`}>
                   {run.steps_done}/{run.steps_total}
                 </td>
-                <td className={CELL}>{formatAge(run.created_at)}</td>
+                <td className={CELL}>
+                  <Age at={run.created_at} />
+                </td>
                 <td className={`${CELL} font-mono text-[13px]`}>
-                  {formatDuration(run.started_at, run.finished_at)}
+                  <Elapsed start={run.started_at} end={run.finished_at} />
                 </td>
               </tr>
             ))}

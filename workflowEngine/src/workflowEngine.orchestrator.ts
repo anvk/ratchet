@@ -1,5 +1,6 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import type { WorkflowEngineSettings, WorkflowStore } from "./workflowEngine.types.ts";
+import { stepDefaults } from "./workflowEngine.utils.ts";
 
 /**
  * Looks after runs as a whole, rather than single steps, until stopSignal
@@ -25,7 +26,7 @@ export async function runOrchestrator({
 
   while (!stopSignal.aborted) {
     try {
-      const swept = await store.sweepExpiredLeases();
+      const swept = await store.sweepExpiredLeases({ defaults: stepDefaults(settings) });
       if (swept > 0)
         console.log(`[orchestrator] made ${swept} step(s) with expired leases ready again`);
     } catch (err) {

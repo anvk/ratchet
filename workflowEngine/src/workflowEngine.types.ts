@@ -1,3 +1,5 @@
+import type { FailureReason } from "./workflowEngine.constants.ts";
+
 /** What a step's run function receives from the engine. */
 export interface StepContext<Input = any> {
   runId: string;
@@ -32,6 +34,17 @@ export interface StepDefinition<Input = any> {
    * third of it, so a step that blocks the event loop for longer loses its lease.
    */
   leaseMs?: number;
+  /**
+   * How many times this step may run, counting the first, before its run fails.
+   * A thrown error and a lost lease both use up an attempt; a NonRetryableError
+   * fails at once. Defaults to the engine's maxAttempts.
+   */
+  maxAttempts?: number;
+  /**
+   * The wait before the first retry, doubling for each one after it. Defaults to
+   * the engine's backoffMs.
+   */
+  backoffMs?: number;
   run(ctx: StepContext<Input>): Promise<unknown>;
 }
 
@@ -128,8 +141,7 @@ export interface WorkflowStore {
     workerId: string;
     workflowNames: string[];
     order: ClaimOrder;
-    /** The lease for steps that don't set their own. */
-    defaultLeaseMs: number;
+    defaults: StepDefaults;
   }): Promise<Claim | null>;
   /**
    * Records success, then readies the next step or finishes the run. With
@@ -141,21 +153,52 @@ export interface WorkflowStore {
     claim: Claim;
     output: unknown;
     claimNext: boolean;
-    /** The lease for the next step if it doesn't set its own. */
-    defaultLeaseMs: number;
+    defaults: StepDefaults;
   }): Promise<{ completed: boolean; next: Claim | null }>;
   /** Pushes a claim's lease forward by its leaseMs. False if this worker no longer owns the step. */
   extendLease(claim: Claim): Promise<boolean>;
   /**
    * Makes every running step whose lease has expired ready again, so another
-   * worker can claim it. Returns how many it found. Safe to run from several
-   * processes at once.
+   * worker can claim it, or fails its run if it has no attempts left. Returns
+   * how many it found. Safe to run from several processes at once.
    */
-  sweepExpiredLeases(): Promise<number>;
-  /** Records failure, skips the remaining steps and fails the run. False if the claim is stale. */
-  failStep(claim: Claim, error: string): Promise<boolean>;
+  sweepExpiredLeases(request: { defaults: StepDefaults }): Promise<number>;
+  /**
+   * Records a failure. If `final` is null and the step has attempts left, the
+   * step becomes ready again after a backoff (`retryInMs`). Otherwise it fails
+   * for good, with `failureReason` saying why: the remaining steps are skipped
+   * and the run fails. `recorded` is false if the claim is stale.
+   */
+  failStep(request: {
+    claim: Claim;
+    error: string;
+    final: FinalFailure | null;
+    defaults: StepDefaults;
+  }): Promise<{
+    recorded: boolean;
+    retryInMs: number | null;
+    failureReason: FailureReason | null;
+  }>;
   /** Releases connections or file handles. */
   close(): Promise<void>;
+}
+
+/**
+ * Why a worker knows a failure must not be retried: the step threw a
+ * NonRetryableError, or the worker has no code for it. The store works out the
+ * other reasons itself.
+ */
+export type FinalFailure = Extract<FailureReason, "non_retryable" | "unknown_step">;
+
+/**
+ * The engine-wide values for whatever a step doesn't set itself. The store needs
+ * them to set leases, schedule retries and cap attempts.
+ */
+export interface StepDefaults {
+  leaseMs: number;
+  maxAttempts: number;
+  backoffMs: number;
+  maxBackoffMs: number;
 }
 
 /** How an engine instance behaves. */
@@ -172,6 +215,12 @@ export interface WorkflowEngineSettings {
   leaseMs: number;
   /** How often the orchestrator sweeps for expired leases. */
   sweepIntervalMs: number;
+  /** How many times a step may run, for steps that don't set their own. See StepDefinition.maxAttempts. */
+  maxAttempts: number;
+  /** The first retry's wait, for steps that don't set their own. See StepDefinition.backoffMs. */
+  backoffMs: number;
+  /** The longest a retry ever waits, however many attempts came before. */
+  maxBackoffMs: number;
 }
 
 /** A running configuration of the engine: its workflows, its storage and its settings. */

@@ -1,11 +1,14 @@
 import { hostname } from "node:os";
 import { setTimeout as sleep } from "node:timers/promises";
+import { NonRetryableError } from "./workflowEngine.errors.ts";
 import type {
   Claim,
   Registry,
+  StepDefaults,
   WorkflowEngineSettings,
   WorkflowStore,
 } from "./workflowEngine.types.ts";
+import { stepDefaults } from "./workflowEngine.utils.ts";
 
 /**
  * Renews a claim's lease every third of it, until stopped. If a renewal finds
@@ -39,8 +42,9 @@ function startHeartbeat({
 
 /**
  * Runs one claimed step, sending heartbeats while it runs, and records whether
- * it succeeded or failed. Returns the run's next step if the store handed it
- * straight to this worker.
+ * it succeeded or failed. A NonRetryableError fails it for good; any other
+ * error is retried while it has attempts left. Returns the run's next step if
+ * the store handed it straight to this worker.
  */
 async function executeStep({
   registry,
@@ -48,21 +52,24 @@ async function executeStep({
   workerId,
   claim,
   claimNext,
-  defaultLeaseMs,
+  defaults,
 }: {
   registry: Registry;
   store: WorkflowStore;
   workerId: string;
   claim: Claim;
   claimNext: boolean;
-  defaultLeaseMs: number;
+  defaults: StepDefaults;
 }): Promise<Claim | null> {
   const step = registry.get(claim.workflow)?.steps.find((s) => s.name === claim.stepName);
   if (!step) {
-    await store.failStep(
+    // Retrying can't help: this code has no such step.
+    await store.failStep({
       claim,
-      `This worker does not know step ${claim.workflow}/${claim.stepName}`,
-    );
+      error: `This worker does not know step ${claim.workflow}/${claim.stepName}`,
+      final: "unknown_step",
+      defaults,
+    });
     return null;
   }
 
@@ -81,8 +88,20 @@ async function executeStep({
   } catch (err) {
     heartbeat.stop();
     const message = err instanceof Error ? err.message : String(err);
-    console.log(`[${workerId}] ${claim.stepName} failed: ${message}`);
-    if (!(await store.failStep(claim, message))) logRejected({ workerId, claim });
+    const { recorded, retryInMs, failureReason } = await store.failStep({
+      claim,
+      error: message,
+      final: err instanceof NonRetryableError ? "non_retryable" : null,
+      defaults,
+    });
+    if (!recorded) logRejected({ workerId, claim });
+    else if (failureReason) {
+      console.log(`[${workerId}] ${claim.stepName} failed (${failureReason}): ${message}`);
+    } else {
+      console.log(
+        `[${workerId}] ${claim.stepName} attempt ${claim.attempt} failed: ${message} (retrying in ${retryInMs}ms)`,
+      );
+    }
     return null;
   }
   heartbeat.stop();
@@ -91,7 +110,7 @@ async function executeStep({
     claim,
     output,
     claimNext,
-    defaultLeaseMs,
+    defaults,
   });
   if (completed) console.log(`[${workerId}] ${claim.stepName} succeeded`);
   else logRejected({ workerId, claim });
@@ -119,7 +138,8 @@ export async function runWorker({
   stopSignal: AbortSignal;
   workerId?: string;
 }) {
-  const { pollMs, errorBackoffMs, claimOrder, leaseMs } = settings;
+  const { pollMs, errorBackoffMs, claimOrder } = settings;
+  const defaults = stepDefaults(settings);
   const workflowNames = [...registry.keys()];
 
   /** Waits, but wakes up as soon as the worker is told to stop. */
@@ -135,7 +155,7 @@ export async function runWorker({
         workerId,
         workflowNames,
         order: claimOrder,
-        defaultLeaseMs: leaseMs,
+        defaults,
       });
       if (!claim) {
         await wait(pollMs);
@@ -150,7 +170,7 @@ export async function runWorker({
           workerId,
           claim,
           claimNext,
-          defaultLeaseMs: leaseMs,
+          defaults,
         });
       }
     } catch (err) {

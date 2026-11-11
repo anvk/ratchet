@@ -3,7 +3,7 @@ import { startWorkers, stopWorkers, store, waitForFinish } from "./harness.ts";
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
-import { createWorkflowEngine, defineWorkflow } from "../src/index.ts";
+import { createWorkflowEngine, DEFAULT_ENGINE_SETTINGS, defineWorkflow } from "../src/index.ts";
 import { db } from "../src/stores/postgres/index.ts";
 import { pipeline } from "./fixtures/workflows.ts";
 
@@ -150,7 +150,7 @@ test("workers only claim steps from workflows they know", async () => {
     workerId: "other-engine",
     workflowNames: [foreign.name],
     order: "fair",
-    defaultLeaseMs: 30_000,
+    defaults: { ...DEFAULT_ENGINE_SETTINGS, leaseMs: 30_000 },
   });
   assert.equal(claim?.runId, runId);
 });

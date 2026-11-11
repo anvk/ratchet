@@ -2,8 +2,9 @@ import type { PillTone } from "../components/Pill";
 
 /**
  * The colour of each event type in a run's history: green for successes, red
- * for failures, blue for work starting, amber for a step taken away from a
- * silent worker, and grey for waiting. Unknown types show grey.
+ * for failures, blue for work starting, amber for a step that will run again
+ * (a retry, or a lease lost by a silent worker), and grey for waiting. Unknown
+ * types show grey.
  */
 export const EVENT_TONES: Record<string, PillTone> = {
   run_queued: "grey",
@@ -16,4 +17,5 @@ export const EVENT_TONES: Record<string, PillTone> = {
   step_failed: "red",
   step_skipped: "grey",
   step_lease_expired: "amber",
+  step_retry_scheduled: "amber",
 };

@@ -1,6 +1,7 @@
-import { defineWorkflow, type StepContext } from "@ratchet/engine";
+import { defineWorkflow, NonRetryableError, type StepContext } from "@ratchet/engine";
 import {
   createSimulation,
+  PaymentDeclined,
   postLedger,
   receivePayment,
   scoreRisk,
@@ -20,6 +21,23 @@ interface PaymentInput {
    * heartbeats, so its lease expires and another worker redoes it.
    */
   overloadRisk?: boolean;
+  /** How many attempts of the sanctions check time out before one gets through. */
+  vendorTimeouts?: number;
+  /** Makes the first ledger write succeed but report a timeout, so it gets retried. */
+  ledgerTimeout?: boolean;
+}
+
+/**
+ * Runs a payment operation, turning a decline into a NonRetryableError: the
+ * engine retries timeouts, but asking again won't change a decision.
+ */
+async function finalIfDeclined<T>(operation: Promise<T>): Promise<T> {
+  try {
+    return await operation;
+  } catch (err) {
+    if (err instanceof PaymentDeclined) throw new NonRetryableError(err.message);
+    throw err;
+  }
 }
 
 /** Builds the simulation for one attempt of one step. */
@@ -46,6 +64,10 @@ export default defineWorkflow<PaymentInput>({
       label: "Risk check overloads its worker",
       input: { forceOutcome: "clear", overloadRisk: true },
     },
+    { label: "Flaky sanctions vendor", input: { forceOutcome: "clear", vendorTimeouts: 2 } },
+    // Times out on all 4 attempts screen-sanctions gets, so the run gives up.
+    { label: "Sanctions vendor down", input: { forceOutcome: "clear", vendorTimeouts: 4 } },
+    { label: "Ledger write times out", input: { forceOutcome: "clear", ledgerTimeout: true } },
   ],
   steps: [
     {
@@ -64,10 +86,12 @@ export default defineWorkflow<PaymentInput>({
       title: "Validate account",
       description: "Checks that the sender has enough funds.",
       run: (ctx) =>
-        validateAccount({
-          amountCents: ctx.outputs["receive-payment"].amountCents,
-          simulation: simulationFor(ctx),
-        }),
+        finalIfDeclined(
+          validateAccount({
+            amountCents: ctx.outputs["receive-payment"].amountCents,
+            simulation: simulationFor(ctx),
+          }),
+        ),
     },
     {
       name: "score-risk",
@@ -78,24 +102,40 @@ export default defineWorkflow<PaymentInput>({
       // recovers a stuck one sooner than the engine's 30-second default.
       leaseMs: 10_000,
       run: (ctx) =>
-        scoreRisk({
-          simulation: simulationFor(ctx),
-          // Only the first attempt, so the retry on another worker succeeds.
-          overloaded: ctx.input.overloadRisk === true && ctx.attempt === 1,
-        }),
+        finalIfDeclined(
+          scoreRisk({
+            simulation: simulationFor(ctx),
+            // Only the first attempt, so the retry on another worker succeeds.
+            overloaded: ctx.input.overloadRisk === true && ctx.attempt === 1,
+          }),
+        ),
     },
     {
       name: "screen-sanctions",
       title: "Screen sanctions",
-      description: "Checks both parties against a fake government sanctions list.",
-      run: (ctx) => screenSanctions({ simulation: simulationFor(ctx) }),
+      description:
+        "Checks both parties against a fake government sanctions list. The vendor sometimes times out, so it's retried.",
+      // A flaky vendor gets more tries, starting half a second apart.
+      maxAttempts: 4,
+      backoffMs: 500,
+      run: (ctx) =>
+        finalIfDeclined(
+          screenSanctions({
+            simulation: simulationFor(ctx),
+            timesOut: ctx.attempt <= (ctx.input.vendorTimeouts ?? 0),
+          }),
+        ),
     },
     {
       name: "post-ledger",
       title: "Post to ledger",
       description: "Writes matching debit and credit entries.",
       run: (ctx) =>
-        postLedger({ ...ctx.outputs["receive-payment"], simulation: simulationFor(ctx) }),
+        postLedger({
+          ...ctx.outputs["receive-payment"],
+          simulation: simulationFor(ctx),
+          responseTimesOut: ctx.input.ledgerTimeout === true && ctx.attempt === 1,
+        }),
     },
   ],
 });

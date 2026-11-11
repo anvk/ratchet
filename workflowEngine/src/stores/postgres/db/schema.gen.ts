@@ -5,6 +5,8 @@
 
 import type { ColumnType } from "kysely";
 
+export type FailureReason = "attempts_exhausted" | "lost_worker" | "non_retryable" | "unknown_step";
+
 export type Generated<T> = T extends ColumnType<infer S, infer I, infer U>
   ? ColumnType<S, I | undefined, U>
   : ColumnType<T, T | undefined, T>;
@@ -43,6 +45,7 @@ export interface Events {
 export interface StepRuns {
   attempt: Generated<number>;
   error: string | null;
+  failure_reason: FailureReason | null;
   finished_at: Timestamp | null;
   id: Generated<string>;
   lease_expires_at: Timestamp | null;
@@ -58,9 +61,11 @@ export interface StepRuns {
 }
 
 export interface Steps {
+  backoff_ms: number | null;
   description: string;
   id: Generated<string>;
   lease_ms: number | null;
+  max_attempts: number | null;
   name: string;
   position: number;
   title: string;
@@ -69,6 +74,7 @@ export interface Steps {
 
 export interface WorkflowRuns {
   created_at: Generated<Timestamp>;
+  failure_reason: FailureReason | null;
   finished_at: Timestamp | null;
   id: Generated<string>;
   idempotency_key: string | null;

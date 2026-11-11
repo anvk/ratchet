@@ -2,8 +2,13 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { WORKFLOW_RUN_STATUSES } from "../src/workflowEngine.constants.ts";
-import { assertUnique, isRunFinished } from "../src/workflowEngine.utils.ts";
+import { DEFAULT_ENGINE_SETTINGS, WORKFLOW_RUN_STATUSES } from "../src/workflowEngine.constants.ts";
+import {
+  assertUnique,
+  isRunFinished,
+  retryDelayMs,
+  stepDefaults,
+} from "../src/workflowEngine.utils.ts";
 
 test("assertUnique accepts names that are all different", () => {
   assert.doesNotThrow(() => assertUnique(["a", "b", "c"], "step"));
@@ -26,4 +31,33 @@ test("assertUnique compares names exactly", () => {
 test("isRunFinished is true only for succeeded and failed", () => {
   const finished = WORKFLOW_RUN_STATUSES.filter(isRunFinished);
   assert.deepEqual(finished.sort(), ["failed", "succeeded"]);
+});
+
+test("retryDelayMs doubles from backoffMs on each attempt", () => {
+  const delay = (attempt: number) =>
+    retryDelayMs({ attempt, backoffMs: 1000, maxBackoffMs: 60_000, random: () => 0.5 });
+  assert.deepEqual([1, 2, 3, 4].map(delay), [1000, 2000, 4000, 8000]);
+});
+
+test("retryDelayMs never goes past maxBackoffMs, before jitter", () => {
+  assert.equal(
+    retryDelayMs({ attempt: 20, backoffMs: 1000, maxBackoffMs: 30_000, random: () => 0.5 }),
+    30_000,
+  );
+});
+
+test("retryDelayMs spreads delays by up to 20% either way", () => {
+  const delay = (random: number) =>
+    retryDelayMs({ attempt: 1, backoffMs: 1000, maxBackoffMs: 30_000, random: () => random });
+  assert.equal(delay(0), 800);
+  assert.equal(delay(0.999_999), 1200);
+});
+
+test("stepDefaults picks the step-related settings", () => {
+  assert.deepEqual(stepDefaults(DEFAULT_ENGINE_SETTINGS), {
+    leaseMs: 30_000,
+    maxAttempts: 3,
+    backoffMs: 1000,
+    maxBackoffMs: 30_000,
+  });
 });

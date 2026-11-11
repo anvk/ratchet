@@ -38,7 +38,7 @@ function fakeStore() {
       calls.completed++;
       return { completed: true, next: null };
     },
-    failStep: async () => true,
+    failStep: async () => ({ recorded: true, retryInMs: null, failureReason: "non_retryable" }),
     extendLease: async () => true,
     sweepExpiredLeases: async () => 0,
     close: async () => {

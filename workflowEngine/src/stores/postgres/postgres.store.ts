@@ -1,10 +1,14 @@
 import { createHash } from "node:crypto";
 import { sql } from "kysely";
 import { db, type Tx } from "./db/index.ts";
+import { retryDelayMs } from "../../workflowEngine.utils.ts";
+import type { FailureReason } from "../../workflowEngine.constants.ts";
 import type {
   Claim,
   ClaimOrder,
   EventFields,
+  FinalFailure,
+  StepDefaults,
   WorkflowDefinition,
   WorkflowStore,
 } from "../../workflowEngine.types.ts";
@@ -39,12 +43,16 @@ function planVersion(definition: WorkflowDefinition): string {
     name: definition.name,
     title: definition.title,
     description: definition.description,
-    steps: definition.steps.map(({ name, title, description, leaseMs }) => ({
-      name,
-      title,
-      description,
-      leaseMs,
-    })),
+    steps: definition.steps.map(
+      ({ name, title, description, leaseMs, maxAttempts, backoffMs }) => ({
+        name,
+        title,
+        description,
+        leaseMs,
+        maxAttempts,
+        backoffMs,
+      }),
+    ),
   };
   return createHash("sha256").update(JSON.stringify(plan)).digest("hex").slice(0, 12);
 }
@@ -77,6 +85,8 @@ async function syncWorkflows(workflows: WorkflowDefinition[]) {
             description: step.description,
             position,
             lease_ms: step.leaseMs ?? null,
+            max_attempts: step.maxAttempts ?? null,
+            backoff_ms: step.backoffMs ?? null,
           })),
         )
         .execute();
@@ -166,12 +176,12 @@ async function takeStep({
   trx,
   stepRunId,
   workerId,
-  defaultLeaseMs,
+  defaults,
 }: {
   trx: Tx;
   stepRunId: string;
   workerId: string;
-  defaultLeaseMs: number;
+  defaults: StepDefaults;
 }): Promise<Claim> {
   // A step added at runtime has no plan row, so it gets the default.
   const plan = await trx
@@ -180,7 +190,7 @@ async function takeStep({
     .select("s.lease_ms")
     .where("sr.id", "=", stepRunId)
     .executeTakeFirstOrThrow();
-  const leaseMs = plan.lease_ms ?? defaultLeaseMs;
+  const leaseMs = plan.lease_ms ?? defaults.leaseMs;
 
   const step = await trx
     .updateTable("step_runs")
@@ -253,12 +263,12 @@ async function claimStep({
   workerId,
   workflowNames,
   order,
-  defaultLeaseMs,
+  defaults,
 }: {
   workerId: string;
   workflowNames: string[];
   order: ClaimOrder;
-  defaultLeaseMs: number;
+  defaults: StepDefaults;
 }): Promise<Claim | null> {
   if (workflowNames.length === 0) return null;
 
@@ -269,6 +279,8 @@ async function claimStep({
       .innerJoin("workflows as w", "w.id", "r.workflow_id")
       .select("sr.id")
       .where("sr.status", "=", "ready")
+      // A step waiting to retry is ready, but not until its backoff is over.
+      .where("sr.ready_at", "<=", sql<Date>`now()`)
       .where("w.name", "in", workflowNames);
     if (order === "oldest-run-first") query = query.orderBy("r.created_at").orderBy("r.id");
     const next = await query
@@ -281,7 +293,7 @@ async function claimStep({
       .executeTakeFirst();
     if (!next) return null;
 
-    return takeStep({ trx, stepRunId: next.id, workerId, defaultLeaseMs });
+    return takeStep({ trx, stepRunId: next.id, workerId, defaults });
   });
 }
 
@@ -292,12 +304,14 @@ async function finishOwnedStep({
   status,
   output,
   error,
+  failureReason,
 }: {
   trx: Tx;
   claim: Claim;
   status: "succeeded" | "failed";
   output?: unknown;
   error?: string;
+  failureReason?: FailureReason;
 }): Promise<boolean> {
   const result = await trx
     .updateTable("step_runs")
@@ -305,6 +319,7 @@ async function finishOwnedStep({
       status,
       output: output === undefined ? null : JSON.stringify(output),
       error: error ?? null,
+      failure_reason: failureReason ?? null,
       finished_at: sql<Date>`now()`,
       lease_expires_at: null,
     })
@@ -324,12 +339,12 @@ async function completeStep({
   claim,
   output,
   claimNext,
-  defaultLeaseMs,
+  defaults,
 }: {
   claim: Claim;
   output: unknown;
   claimNext: boolean;
-  defaultLeaseMs: number;
+  defaults: StepDefaults;
 }): Promise<{ completed: boolean; next: Claim | null }> {
   return db.transaction().execute(async (trx) => {
     if (!(await finishOwnedStep({ trx, claim, status: "succeeded", output }))) {
@@ -362,7 +377,7 @@ async function completeStep({
           trx,
           stepRunId: next.id,
           workerId: claim.workerId,
-          defaultLeaseMs,
+          defaults,
         }),
       };
     }
@@ -377,53 +392,150 @@ async function completeStep({
   });
 }
 
-/**
- * Records a step's failure, skips the remaining steps and fails the run.
- * Returns false if this worker no longer owns the step.
- */
-async function failStep(claim: Claim, error: string): Promise<boolean> {
-  return db.transaction().execute(async (trx) => {
-    if (!(await finishOwnedStep({ trx, claim, status: "failed", error }))) return false;
-    await emit({
-      trx,
-      runId: claim.runId,
-      type: "step_failed",
-      step: claim.stepName,
-      attempt: claim.attempt,
-      workerId: claim.workerId,
-      detail: { error },
-    });
-
-    const skipped = await trx
-      .updateTable("step_runs")
-      .set({ status: "skipped", finished_at: sql<Date>`now()` })
-      .where("run_id", "=", claim.runId)
-      .where("status", "=", "pending")
-      .returning(["name", "position"])
-      .execute();
-    skipped.sort((a, b) => a.position - b.position);
-    for (const step of skipped)
-      await emit({ trx, runId: claim.runId, type: "step_skipped", step: step.name });
-
-    await trx
-      .updateTable("workflow_runs")
-      .set({ status: "failed", finished_at: sql<Date>`now()` })
-      .where("id", "=", claim.runId)
-      .execute();
-    await emit({
-      trx,
-      runId: claim.runId,
-      type: "run_failed",
-      detail: { step: claim.stepName, error },
-    });
-    return true;
-  });
+/** A step's own retry settings from its plan, or the defaults. */
+async function retryPolicy({
+  trx,
+  stepRunId,
+  defaults,
+}: {
+  trx: Tx;
+  stepRunId: string;
+  defaults: StepDefaults;
+}) {
+  const plan = await trx
+    .selectFrom("step_runs as sr")
+    .leftJoin("steps as s", "s.id", "sr.step_id")
+    .select(["s.max_attempts", "s.backoff_ms"])
+    .where("sr.id", "=", stepRunId)
+    .executeTakeFirstOrThrow();
+  return {
+    maxAttempts: plan.max_attempts ?? defaults.maxAttempts,
+    backoffMs: plan.backoff_ms ?? defaults.backoffMs,
+  };
 }
 
 /**
- * The WorkflowStore backed by Postgres. Reads DATABASE_URL when imported, and
- * every store in a process shares one connection pool, so close() closes it for all.
+ * Ends a run whose step has just been marked failed: records the failure,
+ * skips every step that hadn't started, and fails the run.
  */
+async function failRun({
+  trx,
+  runId,
+  stepName,
+  attempt,
+  workerId,
+  error,
+  failureReason,
+}: {
+  trx: Tx;
+  runId: string;
+  stepName: string;
+  attempt: number;
+  workerId?: string;
+  error: string;
+  failureReason: FailureReason;
+}) {
+  await emit({
+    trx,
+    runId,
+    type: "step_failed",
+    step: stepName,
+    attempt,
+    workerId,
+    detail: { error, failureReason },
+  });
+
+  const skipped = await trx
+    .updateTable("step_runs")
+    .set({ status: "skipped", finished_at: sql<Date>`now()` })
+    .where("run_id", "=", runId)
+    .where("status", "=", "pending")
+    .returning(["name", "position"])
+    .execute();
+  skipped.sort((a, b) => a.position - b.position);
+  for (const step of skipped) await emit({ trx, runId, type: "step_skipped", step: step.name });
+
+  await trx
+    .updateTable("workflow_runs")
+    .set({ status: "failed", failure_reason: failureReason, finished_at: sql<Date>`now()` })
+    .where("id", "=", runId)
+    .execute();
+  await emit({ trx, runId, type: "run_failed", detail: { step: stepName, error, failureReason } });
+}
+
+/**
+ * Records a step's failure. A failure that isn't final, with attempts left,
+ * makes the step ready again once its backoff has passed; anything else fails
+ * the run. Returns recorded: false if this worker no longer owns the step.
+ */
+async function failStep({
+  claim,
+  error,
+  final,
+  defaults,
+}: {
+  claim: Claim;
+  error: string;
+  final: FinalFailure | null;
+  defaults: StepDefaults;
+}): Promise<{ recorded: boolean; retryInMs: number | null; failureReason: FailureReason | null }> {
+  return db.transaction().execute(async (trx) => {
+    const policy = await retryPolicy({ trx, stepRunId: claim.stepRunId, defaults });
+
+    if (!final && claim.attempt < policy.maxAttempts) {
+      const retryInMs = retryDelayMs({
+        attempt: claim.attempt,
+        backoffMs: policy.backoffMs,
+        maxBackoffMs: defaults.maxBackoffMs,
+      });
+      // The same ownership check as finishOwnedStep, since the step stays open.
+      const result = await trx
+        .updateTable("step_runs")
+        .set({
+          status: "ready",
+          ready_at: fromNow(retryInMs),
+          error,
+          worker_id: null,
+          started_at: null,
+          lease_expires_at: null,
+        })
+        .where("id", "=", claim.stepRunId)
+        .where("status", "=", "running")
+        .where("worker_id", "=", claim.workerId)
+        .where("attempt", "=", claim.attempt)
+        .executeTakeFirst();
+      if (result.numUpdatedRows !== 1n) {
+        return { recorded: false, retryInMs: null, failureReason: null };
+      }
+      await emit({
+        trx,
+        runId: claim.runId,
+        type: "step_retry_scheduled",
+        step: claim.stepName,
+        attempt: claim.attempt,
+        workerId: claim.workerId,
+        detail: { error, retryInMs },
+      });
+      return { recorded: true, retryInMs, failureReason: null };
+    }
+
+    const failureReason = final ?? "attempts_exhausted";
+    if (!(await finishOwnedStep({ trx, claim, status: "failed", error, failureReason }))) {
+      return { recorded: false, retryInMs: null, failureReason: null };
+    }
+    await failRun({
+      trx,
+      runId: claim.runId,
+      stepName: claim.stepName,
+      attempt: claim.attempt,
+      workerId: claim.workerId,
+      error,
+      failureReason,
+    });
+    return { recorded: true, retryInMs: null, failureReason };
+  });
+}
+
 /** Renews a claim's lease, but only if this worker's attempt still owns the step. */
 async function extendLease(claim: Claim): Promise<boolean> {
   const result = await db
@@ -438,11 +550,12 @@ async function extendLease(claim: Claim): Promise<boolean> {
 }
 
 /**
- * Makes running steps whose lease has expired ready again. The attempt stays as
- * it is, so the next claim bumps it and the old worker's late result no longer
- * matches. SKIP LOCKED lets several orchestrators sweep without blocking each other.
+ * Makes running steps whose lease has expired ready again, or fails their run if
+ * they have no attempts left. The attempt stays as it is, so the next claim bumps
+ * it and the old worker's late result no longer matches. SKIP LOCKED lets several
+ * orchestrators sweep without blocking each other.
  */
-async function sweepExpiredLeases(): Promise<number> {
+async function sweepExpiredLeases({ defaults }: { defaults: StepDefaults }): Promise<number> {
   return db.transaction().execute(async (trx) => {
     const expired = await trx
       .selectFrom("step_runs")
@@ -455,6 +568,43 @@ async function sweepExpiredLeases(): Promise<number> {
       .execute();
 
     for (const step of expired) {
+      const workerId = step.worker_id ?? undefined;
+      await emit({
+        trx,
+        runId: step.run_id,
+        type: "step_lease_expired",
+        step: step.name,
+        attempt: step.attempt,
+        workerId,
+      });
+
+      const { maxAttempts } = await retryPolicy({ trx, stepRunId: step.id, defaults });
+      if (step.attempt >= maxAttempts) {
+        // A step that keeps losing its worker (crashing it, say) stops here.
+        const error = `Lost its worker on attempt ${step.attempt} of ${maxAttempts}`;
+        await trx
+          .updateTable("step_runs")
+          .set({
+            status: "failed",
+            error,
+            failure_reason: "lost_worker",
+            finished_at: sql<Date>`now()`,
+            lease_expires_at: null,
+          })
+          .where("id", "=", step.id)
+          .execute();
+        await failRun({
+          trx,
+          runId: step.run_id,
+          stepName: step.name,
+          attempt: step.attempt,
+          workerId,
+          error,
+          failureReason: "lost_worker",
+        });
+        continue;
+      }
+
       await trx
         .updateTable("step_runs")
         .set({
@@ -466,14 +616,6 @@ async function sweepExpiredLeases(): Promise<number> {
         })
         .where("id", "=", step.id)
         .execute();
-      await emit({
-        trx,
-        runId: step.run_id,
-        type: "step_lease_expired",
-        step: step.name,
-        attempt: step.attempt,
-        workerId: step.worker_id ?? undefined,
-      });
       await emit({ trx, runId: step.run_id, type: "step_ready", step: step.name });
     }
     return expired.length;
