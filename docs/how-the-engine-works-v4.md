@@ -2,8 +2,6 @@
 
 Here's the whole engine from the ground up, using one example throughout: the fake **payment** workflow.
 
-New since [v3](how-the-engine-works-v3.md): steps say which steps they **need**, so independent steps **run side by side**, and a step that needs several waits for all of them (the **join**). When a step fails for good, only the steps that depend on it stop; **the rest of the run carries on**. A failed run can be **resumed** from the steps that didn't succeed, and workers only run steps of the **workflow version** they have code for. Section 10 is new; the rest is v3 with those ideas added where they fit. (Earlier: [v2](how-the-engine-works-v2.md) added leases, [v1](how-the-engine-works-v1.md) is the original design.)
-
 ---
 
 ## 1. The big idea
@@ -66,9 +64,7 @@ A step can also set **`leaseMs`**: how long its worker may go silent before the 
 
 And it can set its **retry policy** (section 11): **`maxAttempts`**, how many times it may run in all, and **`backoffMs`**, the first wait before a retry. `screen-sanctions` calls a flaky vendor, so it gets 4 attempts, starting half a second apart; steps that don't set them get 3 attempts, starting 1 second apart.
 
-The engine knows nothing about payments. It only knows "named functions and what each one needs". That's why adding a workflow is just one new file plus one line in `workflows/index.ts`.
-
-The dashboard's **presets** (ready-made inputs like "Sanctions match") aren't part of the engine at all. They live in `workflows/payment/presets.ts`, and the app hands them to the API; `defineWorkflow` never sees them.
+The engine knows nothing about payments. It only knows "named functions and what each one needs".
 
 ---
 

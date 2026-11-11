@@ -10,7 +10,7 @@ pnpm install
 pnpm dev
 ```
 
-Open <http://localhost:5173>, pick a workflow and press **Start run**. `pnpm dev` starts Postgres, the API, the orchestrator, three workers and the dashboard.
+Open <http://localhost:5173>, pick a workflow and press **Start run**. `pnpm dev` starts the demo: Postgres, the API, the orchestrator, three workers and the dashboard.
 How it all works is explained in [`docs/how-the-engine-works-v4.md`](docs/how-the-engine-works-v4.md)
 (earlier designs: [v1](docs/how-the-engine-works-v1.md), [v2](docs/how-the-engine-works-v2.md), [v3](docs/how-the-engine-works-v3.md)).
 
@@ -28,17 +28,28 @@ The example workflows are fake. No real money or payment provider is involved.
 
 ## Layout
 
-| Path              | What's there                                                                                                                                                                                                                              |
-| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `workflowEngine/` | The generic engine: workers, the orchestrator, leases, the registry and the `WorkflowStore` interface, with Postgres in `src/stores/postgres/`. Knows nothing about HTTP or any specific workflow. What it promises is in `guarantees.md` |
-| `api/`            | HTTP API for clients. Reads tables directly, makes every state change through the engine, and exports its response types from `src/api.types.ts`                                                                                          |
-| `workflows/`      | Workflow definitions, their dashboard presets, the list of them, and the process entry points: `api.ts`, `worker.ts` and `orchestrator.ts`                                                                                                |
-| `client/`         | Dashboard: runs list and live diagram, driven only by the HTTP API                                                                                                                                                                        |
-| `docs/`           | Walkthroughs of how the engine works, for newcomers: `how-the-engine-works-v4.md` describes the current engine; `v1` (the original design), `v2` (with leases) and `v3` (with retries) show how it got there                              |
+The engine is one package. Everything else in the repo is a demo built on it,
+to show it running; none of the demo is needed to use the engine.
 
-## Add a workflow
+**The engine**
 
-Create `workflows/<name>/workflow.ts`:
+| Path              | What's there                                                                                                                                                                |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `workflowEngine/` | Workers, the orchestrator, leases, retries, the registry and the `WorkflowStore` interface, with Postgres in `src/stores/postgres/`. What it promises is in `guarantees.md` |
+| `docs/`           | Walkthroughs of how the engine works, for newcomers. `how-the-engine-works-v4.md` describes the current engine                                                              |
+
+**Demo only**
+
+| Path         | What's there                                                                                                    |
+| ------------ | --------------------------------------------------------------------------------------------------------------- |
+| `workflows/` | Fake payment and greeting workflows, and the processes that run them (`api.ts`, `worker.ts`, `orchestrator.ts`) |
+| `api/`       | HTTP API for the dashboard. Reads the engine's tables directly and makes every change through the engine        |
+| `client/`    | The dashboard: runs list, live step diagram and event log, driven only by the HTTP API                          |
+
+## Use the engine
+
+A workflow is a list of named steps. Each step is an async function, and
+`needs` says which steps must succeed before it starts:
 
 ```ts
 import { defineWorkflow } from "@ratchet/engine";
@@ -84,22 +95,31 @@ export default defineWorkflow<StockReportInput>({
 });
 ```
 
-A step without `needs` waits for the step listed before it, so a plain list
-runs in order. A step can only need steps listed before it.
-
-Then add it to the list in `workflows/index.ts`. The API copies its plan into
-the database on startup, and the dashboard shows it with no other changes.
-
-To offer ready-made inputs in the dashboard, add a `presets.ts` next to it and
-list it in `presets` in `workflows/index.ts`. Presets are a dashboard feature;
-the engine never sees them:
+An engine pairs your workflows with a store, which keeps their state in
+Postgres (`DATABASE_URL`). Start runs from anywhere; run workers in as many
+processes as you like, and one orchestrator:
 
 ```ts
-import type { Preset } from "@ratchet/api/types";
-import type { StockReportInput } from "./workflow.ts";
+import { closeOnSignals, createWorkflowEngine } from "@ratchet/engine";
+import { createPostgresStore } from "@ratchet/engine/postgres";
+import stockReport from "./stockReport.ts";
 
-export const presets: Preset<StockReportInput>[] = [{ label: "Apple", input: { ticker: "AAPL" } }];
+const engine = createWorkflowEngine({ workflows: [stockReport], store: createPostgresStore() });
+
+// Once per deploy: save each workflow's plan, so runs can be started.
+await engine.sync();
+const runId = await engine.startRun({ definition: stockReport, input: { ticker: "AAPL" } });
+
+// In a worker process: claim and run steps until stopped.
+closeOnSignals(engine);
+await engine.runWorker();
+
+// In one process: give steps whose worker went silent to another worker.
+await engine.runOrchestrator();
 ```
+
+The `workflows/` folder is a working example of this setup, with the
+dashboard on top.
 
 ## Data model
 
