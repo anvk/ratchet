@@ -48,10 +48,13 @@ to show it running; none of the demo is needed to use the engine.
 
 ## Use the engine
 
+### Define a workflow
+
 A workflow is a list of named steps. Each step is an async function, and
 `needs` says which steps must succeed before it starts:
 
 ```ts
+// stockReport.ts
 import { defineWorkflow } from "@ratchet/engine";
 
 export interface StockReportInput {
@@ -95,28 +98,84 @@ export default defineWorkflow<StockReportInput>({
 });
 ```
 
+### Create the engine
+
 An engine pairs your workflows with a store, which keeps their state in
-Postgres (`DATABASE_URL`). Start runs from anywhere; run workers in as many
-processes as you like, and one orchestrator:
+Postgres. Put it in one module that every process imports, so they all agree
+on the workflows and settings:
 
 ```ts
-import { closeOnSignals, createWorkflowEngine } from "@ratchet/engine";
+// engine.ts
+import { createWorkflowEngine } from "@ratchet/engine";
 import { createPostgresStore } from "@ratchet/engine/postgres";
 import stockReport from "./stockReport.ts";
 
-const engine = createWorkflowEngine({ workflows: [stockReport], store: createPostgresStore() });
-
-// Once per deploy: save each workflow's plan, so runs can be started.
-await engine.sync();
-const runId = await engine.startRun({ workflow: "stock-report", input: { ticker: "AAPL" } });
-
-// In a worker process: claim and run steps until stopped.
-closeOnSignals(engine);
-await engine.runWorker();
-
-// In one process: give steps whose worker went silent to another worker.
-await engine.runOrchestrator();
+export const engine = createWorkflowEngine({
+  workflows: [stockReport],
+  store: createPostgresStore(), // connects to DATABASE_URL
+  settings: { closeTimeoutMs: 25_000 }, // optional; see WorkflowEngineSettings
+});
 ```
+
+### Run three kinds of process
+
+They only share the database, so each can run as its own process, container
+or pod.
+
+**Whatever starts runs**, such as your API. `sync()` saves each workflow's
+plan, which `startRun` needs; call it once at startup. `startRun` only records
+the run and returns its id. Workers do the work.
+
+```ts
+// api.ts
+import { engine } from "./engine.ts";
+
+await engine.sync();
+
+const runId = await engine.startRun({ workflow: "stock-report", input: { ticker: "AAPL" } });
+```
+
+**Workers** claim ready steps and run them, until they're told to stop. Run
+as many as you need; two never get the same step.
+
+```ts
+// worker.ts
+import { closeOnSignals } from "@ratchet/engine";
+import { engine } from "./engine.ts";
+
+closeOnSignals(engine); // SIGTERM: stop claiming, finish running steps, then exit
+await engine.runWorker();
+await engine.close();
+```
+
+**One orchestrator** gives a step to another worker when its worker stops
+sending heartbeats, for example because it crashed.
+
+```ts
+// orchestrator.ts
+import { closeOnSignals } from "@ratchet/engine";
+import { engine } from "./engine.ts";
+
+closeOnSignals(engine);
+await engine.runOrchestrator();
+await engine.close();
+```
+
+Workers and the orchestrator don't call `sync()`.
+
+### Running in containers
+
+- Build all three from one image and choose the entry file with the command,
+  so every process runs the same code.
+- Each worker needs a unique id. It defaults to `hostname-pid`, which is
+  unique per pod in Kubernetes, or pass `runWorker({ workerId })`.
+- Keep `closeTimeoutMs` below the time your platform waits between SIGTERM and
+  killing the process (30 seconds in Kubernetes). A worker killed mid-step
+  loses nothing: the orchestrator gives the step to another worker once its
+  lease expires.
+- A second orchestrator is safe, but does the same work twice.
+- Each process keeps up to 10 Postgres connections. Keep processes × 10 under
+  Postgres's `max_connections`.
 
 The `workflows/` folder is a working example of this setup, with the
 dashboard on top.
