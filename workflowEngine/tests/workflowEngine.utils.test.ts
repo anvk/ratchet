@@ -7,6 +7,7 @@ import {
   ancestors,
   assertUnique,
   canRedrive,
+  dependents,
   isRunFinished,
   resolveNeeds,
   retryDelayMs,
@@ -131,4 +132,10 @@ test("canRedrive allows failures that a fix could cure, not decisions", () => {
   assert.equal(canRedrive("failed", "non_retryable"), false);
   assert.equal(canRedrive("succeeded", null), false);
   assert.equal(canRedrive("running", null), false);
+});
+
+test("dependents includes steps that depend on a step through others", () => {
+  assert.deepEqual([...dependents(diamond, "validate")].sort(), ["ledger", "risk", "sanctions"]);
+  assert.deepEqual([...dependents(diamond, "risk")], ["ledger"], "not the parallel sanctions");
+  assert.equal(dependents(diamond, "ledger").size, 0);
 });

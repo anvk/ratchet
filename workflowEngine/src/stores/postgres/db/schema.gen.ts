@@ -25,7 +25,7 @@ export type JsonPrimitive = boolean | number | string | null;
 
 export type JsonValue = JsonArray | JsonObject | JsonPrimitive;
 
-export type StepRunStatus = "cancelled" | "failed" | "pending" | "ready" | "running" | "skipped" | "succeeded";
+export type StepRunStatus = "failed" | "pending" | "ready" | "running" | "skipped" | "succeeded";
 
 export type Timestamp = ColumnType<Date, Date | string, Date | string>;
 

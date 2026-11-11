@@ -1,7 +1,13 @@
 import { createHash } from "node:crypto";
 import { sql } from "kysely";
 import { db, type Tx } from "./db/index.ts";
-import { ancestors, canRedrive, resolveNeeds, retryDelayMs } from "../../workflowEngine.utils.ts";
+import {
+  ancestors,
+  canRedrive,
+  dependents,
+  resolveNeeds,
+  retryDelayMs,
+} from "../../workflowEngine.utils.ts";
 import type { FailureReason } from "../../workflowEngine.constants.ts";
 import type {
   Claim,
@@ -463,22 +469,7 @@ async function completeStep({
       };
     }
 
-    // Nothing new to run: the run is done once no step is left unfinished.
-    const unfinished = await trx
-      .selectFrom("step_runs")
-      .select("id")
-      .where("run_id", "=", claim.runId)
-      .where("status", "!=", "succeeded")
-      .limit(1)
-      .executeTakeFirst();
-    if (unfinished) return { completed: true, next: null };
-
-    await trx
-      .updateTable("workflow_runs")
-      .set({ status: "succeeded", finished_at: sql<Date>`now()` })
-      .where("id", "=", claim.runId)
-      .execute();
-    await emit({ trx, runId: claim.runId, type: "run_succeeded" });
+    await finishRunIfDone({ trx, runId: claim.runId });
     return { completed: true, next: null };
   });
 }
@@ -510,12 +501,52 @@ async function retryPolicy({
 }
 
 /**
- * Ends a run whose step has just been marked failed: records the failure,
- * skips every step that hadn't started, cancels every step still running, and
- * fails the run. A cancelled step's worker finds out at its next heartbeat
- * (ctx.signal fires), and its result is rejected like any stale claim's.
+ * Finishes a run once nothing in it can move: no step is pending, ready or
+ * running. It succeeded if every step did; otherwise it failed, with the
+ * reason of the step that failed first. Call it with the run locked.
  */
-async function failRun({
+async function finishRunIfDone({ trx, runId }: { trx: Tx; runId: string }) {
+  const steps = await trx
+    .selectFrom("step_runs")
+    .select(["name", "status", "error", "failure_reason", "finished_at", "position"])
+    .where("run_id", "=", runId)
+    .execute();
+  if (steps.some((s) => ["pending", "ready", "running"].includes(s.status))) return;
+
+  const failed = steps
+    .filter((s) => s.status === "failed")
+    .sort((a, b) => a.finished_at!.getTime() - b.finished_at!.getTime() || a.position - b.position);
+  if (failed.length === 0) {
+    await trx
+      .updateTable("workflow_runs")
+      .set({ status: "succeeded", finished_at: sql<Date>`now()` })
+      .where("id", "=", runId)
+      .execute();
+    await emit({ trx, runId, type: "run_succeeded" });
+    return;
+  }
+
+  const first = failed[0];
+  await trx
+    .updateTable("workflow_runs")
+    .set({ status: "failed", failure_reason: first.failure_reason, finished_at: sql<Date>`now()` })
+    .where("id", "=", runId)
+    .execute();
+  await emit({
+    trx,
+    runId,
+    type: "run_failed",
+    detail: { step: first.name, error: first.error, failureReason: first.failure_reason },
+  });
+}
+
+/**
+ * Follows up a step that has just been marked failed for good. Steps that
+ * depend on it can never run, so they're skipped; every other step carries on,
+ * so a run does all the work it still can. The run finishes once nothing is
+ * left to move. Call it with the run locked.
+ */
+async function recordFinalFailure({
   trx,
   runId,
   stepName,
@@ -542,48 +573,34 @@ async function failRun({
     detail: { error, failureReason },
   });
 
-  const cancelled = await trx
-    .updateTable("step_runs")
-    .set({ status: "cancelled", finished_at: sql<Date>`now()`, lease_expires_at: null })
+  const runSteps = await trx
+    .selectFrom("step_runs")
+    .select(["name", "needs"])
     .where("run_id", "=", runId)
-    .where("status", "=", "running")
-    .returning(["name", "position", "attempt", "worker_id"])
     .execute();
-  cancelled.sort((a, b) => a.position - b.position);
-  for (const step of cancelled) {
-    await emit({
-      trx,
-      runId,
-      type: "step_cancelled",
-      step: step.name,
-      attempt: step.attempt,
-      workerId: step.worker_id ?? undefined,
-    });
+  const blocked = [...dependents(runSteps, stepName)];
+  if (blocked.length > 0) {
+    // Only pending ones: a step can't start before everything it depends on succeeds.
+    const skipped = await trx
+      .updateTable("step_runs")
+      .set({ status: "skipped", finished_at: sql<Date>`now()` })
+      .where("run_id", "=", runId)
+      .where("name", "in", blocked)
+      .where("status", "=", "pending")
+      .returning(["name", "position"])
+      .execute();
+    skipped.sort((a, b) => a.position - b.position);
+    for (const step of skipped) await emit({ trx, runId, type: "step_skipped", step: step.name });
   }
 
-  // Ready steps haven't started either, including those waiting to retry.
-  const skipped = await trx
-    .updateTable("step_runs")
-    .set({ status: "skipped", finished_at: sql<Date>`now()` })
-    .where("run_id", "=", runId)
-    .where("status", "in", ["pending", "ready"])
-    .returning(["name", "position"])
-    .execute();
-  skipped.sort((a, b) => a.position - b.position);
-  for (const step of skipped) await emit({ trx, runId, type: "step_skipped", step: step.name });
-
-  await trx
-    .updateTable("workflow_runs")
-    .set({ status: "failed", failure_reason: failureReason, finished_at: sql<Date>`now()` })
-    .where("id", "=", runId)
-    .execute();
-  await emit({ trx, runId, type: "run_failed", detail: { step: stepName, error, failureReason } });
+  await finishRunIfDone({ trx, runId });
 }
 
 /**
  * Records a step's failure. A failure that isn't final, with attempts left,
  * makes the step ready again once its backoff has passed; anything else fails
- * the run. Returns recorded: false if this worker no longer owns the step.
+ * the step for good (see recordFinalFailure). Returns recorded: false if this
+ * worker no longer owns the step.
  */
 async function failStep({
   claim,
@@ -642,7 +659,7 @@ async function failStep({
     if (!(await finishOwnedStep({ trx, claim, status: "failed", error, failureReason }))) {
       return { recorded: false, retryInMs: null, failureReason: null };
     }
-    await failRun({
+    await recordFinalFailure({
       trx,
       runId: claim.runId,
       stepName: claim.stepName,
@@ -733,7 +750,7 @@ async function sweepExpiredLeases({ defaults }: { defaults: StepDefaults }): Pro
           })
           .where("id", "=", step.id)
           .execute();
-        await failRun({
+        await recordFinalFailure({
           trx,
           runId: step.run_id,
           stepName: step.name,

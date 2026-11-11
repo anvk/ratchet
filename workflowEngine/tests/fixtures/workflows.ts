@@ -143,15 +143,13 @@ interface DiamondInput {
   survivorMs?: number;
 }
 
-/** A branch step: waits (stopping early if it loses the step), then reports what it could see. */
+/** A branch step: waits (stopping early if it loses its lease), then reports what it could see. */
 function branch(name: "left" | "right") {
   return {
     name,
     title: name,
     description: `Runs alongside the other branch.`,
     needs: ["start"],
-    // Short, so a cancelled branch hears about it within 100ms.
-    leaseMs: 300,
     async run(ctx: StepContext<DiamondInput>) {
       const { failBranch, branchMs = 50, survivorMs } = ctx.input;
       const ms = failBranch && failBranch !== name ? (survivorMs ?? branchMs) : branchMs;
@@ -162,7 +160,7 @@ function branch(name: "left" | "right") {
   };
 }
 
-/** start, then left and right side by side, then join once both are done. */
+/** start, then left and right side by side, then join once both are done. tail only needs right. */
 export const diamond = defineWorkflow<DiamondInput>({
   name: "diamond",
   title: "Diamond",
@@ -176,6 +174,13 @@ export const diamond = defineWorkflow<DiamondInput>({
       title: "join",
       description: "Needs both branches.",
       needs: ["left", "right"],
+      run: async (ctx) => ({ seen: Object.keys(ctx.outputs).sort() }),
+    },
+    {
+      name: "tail",
+      title: "tail",
+      description: "Only needs right, so it runs even if left fails.",
+      needs: ["right"],
       run: async (ctx) => ({ seen: Object.keys(ctx.outputs).sort() }),
     },
   ],

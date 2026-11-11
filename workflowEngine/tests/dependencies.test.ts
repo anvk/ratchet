@@ -73,41 +73,32 @@ test("a step sees the outputs of everything it depends on, but not of a parallel
   assert.deepEqual(steps.left.output, { seen: ["start"] });
   assert.deepEqual(steps.right.output, { seen: ["start"] });
   assert.deepEqual(steps.join.output, { seen: ["left", "right", "start"] });
+  assert.deepEqual(steps.tail.output, { seen: ["right", "start"] });
 });
 
-test("a branch that fails cancels the one still running, and skips the join", async () => {
-  // left fails after 300ms, while right still has 5s to go unless told to stop.
+test("a failed branch only stops what depends on it: the rest of the run carries on", async () => {
+  // left fails after 300ms; right takes a second, then tail (which only needs right) runs.
   const runId = await store.startRun({
     definition: diamond,
-    input: { failBranch: "left", branchMs: 300, survivorMs: 5_000 },
+    input: { failBranch: "left", branchMs: 300, survivorMs: 1_000 },
   });
-  const started = Date.now();
   await waitForFinish([runId]);
 
   const steps = await stepsOf(runId);
   assert.equal(steps.left.status, "failed");
-  assert.equal(steps.right.status, "cancelled");
-  assert.equal(steps.join.status, "skipped");
+  assert.equal(steps.right.status, "succeeded", "a branch that doesn't need left finishes");
+  assert.equal(steps.tail.status, "succeeded", "and steps after it still start");
+  assert.ok(steps.tail.started_at! > steps.left.finished_at!, "tail started after left failed");
+  assert.equal(steps.join.status, "skipped", "join needs left, so it can never run");
+
   const run = await db
     .selectFrom("workflow_runs")
-    .select(["status", "failure_reason"])
+    .select(["status", "failure_reason", "finished_at"])
     .where("id", "=", runId)
     .executeTakeFirstOrThrow();
-  assert.deepEqual(run, { status: "failed", failure_reason: "non_retryable" });
-  assert.ok(Date.now() - started < 3_000, "the run fails without waiting for the other branch");
-
-  // The cancelled branch's worker lost the step, so it recorded nothing more.
-  const cancelled = await db
-    .selectFrom("events")
-    .select("type")
-    .where("run_id", "=", runId)
-    .where("step_name", "=", "right")
-    .orderBy("id")
-    .execute();
-  assert.deepEqual(
-    cancelled.map((e) => e.type),
-    ["step_ready", "step_claimed", "step_cancelled"],
-  );
+  assert.equal(run.status, "failed");
+  assert.equal(run.failure_reason, "non_retryable");
+  assert.ok(run.finished_at! >= steps.tail.finished_at!, "the run ends when nothing can move");
 });
 
 test("defineWorkflow only lets a step need steps listed before it", () => {

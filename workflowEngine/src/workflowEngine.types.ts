@@ -154,7 +154,8 @@ export interface WorkflowStore {
   }): Promise<Claim | null>;
   /**
    * Records success, then readies every step whose needs have now all
-   * succeeded, or finishes the run if nothing is left. Two steps finishing at
+   * succeeded, or finishes the run once nothing can move: succeeded if every
+   * step did, failed if any failed for good. Two steps finishing at
    * once must ready a step that needs both exactly once. With claimNext, the
    * first newly ready step goes straight to the same worker in the same
    * transaction, so no other worker can take it in between. `completed` is
@@ -177,9 +178,9 @@ export interface WorkflowStore {
   /**
    * Records a failure. If `final` is null and the step has attempts left, the
    * step becomes ready again after a backoff (`retryInMs`). Otherwise it fails
-   * for good, with `failureReason` saying why, and the run fails: steps that
-   * haven't started are skipped, and steps still running are cancelled, so
-   * their workers lose them. `recorded` is false if the claim is stale.
+   * for good, with `failureReason` saying why: steps that depend on it are
+   * skipped, every other step carries on, and the run fails once nothing is
+   * left to move. `recorded` is false if the claim is stale.
    */
   failStep(request: {
     claim: Claim;

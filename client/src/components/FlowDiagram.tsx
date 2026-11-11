@@ -12,7 +12,6 @@ const ICONS: Record<StepDisplayStatus, string> = {
   succeeded: "✓",
   failed: "✕",
   skipped: "–",
-  cancelled: "⊘",
 };
 
 const COLORS: Record<StepDisplayStatus, string> = {
@@ -23,7 +22,6 @@ const COLORS: Record<StepDisplayStatus, string> = {
   succeeded: "border-green bg-green-soft text-green",
   failed: "border-red bg-red-soft text-red",
   skipped: "border-grey border-dashed bg-grey-soft text-grey",
-  cancelled: "border-grey bg-grey-soft text-grey",
 };
 
 /** Space between columns and between cards stacked in one column, in pixels. */

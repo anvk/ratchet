@@ -39,10 +39,10 @@ What the engine promises. Each guarantee is backed by a test in
 - **Every step has a limit on attempts.** Its own `maxAttempts`, or the
   engine's default. Errors and lost leases both use up attempts, so a step that
   keeps crashing its worker stops too.
-- **A step that fails for good ends the run.** The step is final, steps still
-  running become `cancelled` (their workers lose them at the next heartbeat,
-  and any late result is rejected), steps that never started become
-  `skipped`, and the run becomes `failed`.
+- **A step that fails for good only stops what depends on it.** Steps that
+  depend on it, directly or not, become `skipped`. Every other step carries
+  on: running steps finish and ready steps still start. Once nothing can move,
+  the run becomes `failed`, with the reason of the step that failed first.
 - **A failed run can be resumed if a fix could cure it.** Redriving a run that
   failed with `attempts_exhausted`, `lost_worker` or `unknown_step` reruns the
   steps that didn't succeed, with fresh attempts; steps that succeeded keep
@@ -71,9 +71,8 @@ What the engine promises. Each guarantee is backed by a test in
   something and then failed (or its reply was lost), the retry writes it again,
   unless the step makes its side effects safe to repeat, for example with a
   unique key or `ctx.idempotencyKey`.
-- **Cancelling a step can't force it to stop.** Its worker finds out at the
-  next heartbeat and should stop if the step listens to `ctx.signal`; otherwise
-  it keeps working and only its result is thrown away.
+- **A failed run ends only when its last running step does,** since steps
+  that don't depend on the failure finish first.
 - **A version covers the plan, not the code.** Editing only the code inside a
   step's `run` doesn't create a new version, so workers with either code
   claim the same runs.

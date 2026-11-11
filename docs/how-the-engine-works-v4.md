@@ -2,7 +2,7 @@
 
 Here's the whole engine from the ground up, using one example throughout: the fake **payment** workflow.
 
-New since [v3](how-the-engine-works-v3.md): steps say which steps they **need**, so independent steps **run side by side**, and a step that needs several waits for all of them (the **join**). When a step fails for good, steps still running are **cancelled**. A failed run can be **resumed** from the steps that didn't succeed, and workers only run steps of the **workflow version** they have code for. Section 10 is new; the rest is v3 with those ideas added where they fit. (Earlier: [v2](how-the-engine-works-v2.md) added leases, [v1](how-the-engine-works-v1.md) is the original design.)
+New since [v3](how-the-engine-works-v3.md): steps say which steps they **need**, so independent steps **run side by side**, and a step that needs several waits for all of them (the **join**). When a step fails for good, only the steps that depend on it stop; **the rest of the run carries on**. A failed run can be **resumed** from the steps that didn't succeed, and workers only run steps of the **workflow version** they have code for. Section 10 is new; the rest is v3 with those ideas added where they fit. (Earlier: [v2](how-the-engine-works-v2.md) added leases, [v1](how-the-engine-works-v1.md) is the original design.)
 
 ---
 
@@ -219,23 +219,23 @@ The worker calls the step's `run` function, renewing its lease while it runs. Th
 
 **❌ It threw an error:** `failStep`, in one transaction, with the same run lock and ownership check. If the error can be retried and the step has attempts left, it's scheduled to run again (section 11). Otherwise it fails for good:
 1. saves the error message and marks the step **`failed`**, with a **failure reason** (section 11);
-2. marks steps still running **`cancelled`**;
-3. marks steps that never started **`skipped`**;
-4. marks the run **`failed`**, with the same reason.
+2. marks **`skipped`** every step that depends on it, directly or through others, because none of them can ever run;
+3. leaves every other step alone: steps already running finish, and steps whose needs are met still start;
+4. once nothing in the run can move any more, marks the run **`failed`**, with the reason of the step that failed first.
 
 Here's the payment run with the "Sanctions match" preset, as you've seen in the dashboard:
 
 ```
 receive-payment   ✅ succeeded
 validate-account  ✅ succeeded
-score-risk        ⊘ cancelled       (was still running alongside)
-screen-sanctions  ❌ failed: "Sanctions list match"
-post-ledger       – skipped
+screen-sanctions  ❌ failed: "Sanctions list match"     at 2s
+post-ledger       – skipped (needs screen-sanctions)    at 2s
+score-risk        ✅ succeeded, still running alongside at 3.5s → the run fails now
 ```
 
-A sanctions match is a decision, not a glitch: asking again gives the same answer. So the step throws a `NonRetryableError`, and the run fails at once instead of trying three times.
+A sanctions match is a decision, not a glitch: asking again gives the same answer. So the step throws a `NonRetryableError` and doesn't retry.
 
-**Why cancel `score-risk`?** The run has already failed, so its answer is no use. Marking it `cancelled` takes it away from its worker the same way a lost lease does: the worker's next heartbeat finds it no longer owns the step, so `ctx.signal` fires (the payment steps pass it to their simulated network calls, which stop at once), and if it finishes anyway, its result is rejected.
+**Why let `score-risk` finish?** Runs only move forward: a run does all the work it still can. `post-ledger` needs sanctions, so it can never run, and it's skipped straight away. `score-risk` doesn't need sanctions, so by the workflow's own description it's still valid work, and stopping it would throw that work away. If a step mustn't happen when another fails, it should `need` that step. Finishing what can be finished also pays off with redrive (section 11): steps that succeeded are never run again, so the more that succeeded, the less a resume has to redo. The cost is a slower answer: the run says `failed` only when the last running step ends.
 
 **Why does every change write an event in the same transaction?** The `events` table is the run's diary, which is the event list on the run page. Because the diary entry and the state change are saved together, the diary can never disagree with the current state.
 
@@ -264,7 +264,7 @@ worker-2: (waits for the lock) lock run A. screen-sanctions done.
 
 Whoever goes second sees the first one's work, so the step that needs both is readied **exactly once**. The lock only covers one run, so different runs never wait for each other, and it lasts milliseconds.
 
-The same lock covers the other run-wide decisions: "every step has succeeded, so the run has", and "this step failed, so cancel the others". It also has to be taken in the same order everywhere, the run first and then its steps, or two transactions could each hold the lock the other wants and wait forever (a **deadlock**). That's why the orchestrator's sweep locks the run before the expired step, too. (The one exception is claiming a run's very first step, which marks the run `running`; nothing else can be holding a run's lock before it has started.)
+The same lock covers the other run-wide decision: "nothing can move any more, so the run is finished". Two branches ending at the same moment would otherwise each see the other still running, and the run would never be marked done. It also has to be taken in the same order everywhere, the run first and then its steps, or two transactions could each hold the lock the other wants and wait forever (a **deadlock**). That's why the orchestrator's sweep locks the run before the expired step, too. (The one exception is claiming a run's very first step, which marks the run `running`; nothing else can be holding a run's lock before it has started.)
 
 A test (`dependencies.test.ts`) runs 120 diamond-shaped runs whose two branches finish together. With the lock, every join runs exactly once. With the lock removed, some runs get stuck every time, and the test fails.
 
@@ -307,7 +307,7 @@ The dashboard shows the reason next to the Failed badge.
 
 **Resuming a failed run (redrive).** Once you've fixed the cause, you don't have to start again from the beginning. `redriveRun` (the **Resume from failed step** button on the run page) puts the run back to `running`: every step that didn't succeed goes back to `pending`, those whose needs have already succeeded become `ready`, and steps that succeeded keep their outputs and never run again. It's only offered for the three reasons a fix can cure, not `non_retryable`: asking again won't change a decision.
 
-The resumed steps get **fresh attempts**, but their attempt numbers keep counting up: attempt 5, not attempt 1. The ownership check (section 8) matches on the attempt number, so if it started again from 1, a worker still finishing a cancelled attempt from before could match a new attempt and save a stale result. Instead, `prior_attempts` remembers where the redrive happened, and `maxAttempts` counts only the attempts after it. Try **Sanctions vendor down**, then press **Resume from failed step**: the simulated vendor has "recovered", so attempt 5 succeeds and the payment posts.
+The resumed steps get **fresh attempts**, but their attempt numbers keep counting up: attempt 5, not attempt 1. The ownership check (section 8) matches on the attempt number, so if it started again from 1, a worker that lost its lease before the run failed, and is somehow still running, could match a new attempt and save a stale result. Instead, `prior_attempts` remembers where the redrive happened, and `maxAttempts` counts only the attempts after it. Try **Sanctions vendor down**, then press **Resume from failed step**: the simulated vendor has "recovered", so attempt 5 succeeds and the payment posts.
 
 ---
 
@@ -402,7 +402,7 @@ interface WorkflowStore {
 ## What it doesn't handle yet
 
 - **A retry repeats whatever the failed attempt already did,** unless the step makes it safe to repeat (section 12). The engine can't do that for you.
-- **Cancelling can't force a step to stop.** A cancelled step's worker hears about it at its next heartbeat, and only stops early if the step listens to `ctx.signal`. Until then it keeps working; only its result is thrown away.
+- **A failed run takes as long as its slowest independent step.** Steps that don't depend on the failed one finish first, so the caller hears "failed" later than it could.
 - **A version covers the plan, not the code.** Changing a step's name, needs, lease or retries makes a new version; changing only the code inside `run` doesn't, so old and new workers both claim the same runs.
 - **Lost leases need the orchestrator:** if it isn't running, steps whose worker went silent stay `running`.
 
@@ -418,7 +418,7 @@ All four are listed in `workflowEngine/guarantees.md`.
 
 Keep the dashboard open while you start a run, and you can watch each part of this happen live in the event list. These presets show the rest:
 - **Payment clears:** the two checks run side by side on two workers, and `post-ledger` waits for both;
-- **Sanctions match:** a check fails while the other is still running, which is cancelled;
+- **Sanctions match:** a check fails, `post-ledger` (which needs it) is skipped, and the risk check alongside still finishes before the run fails;
 - **Risk check overloads its worker:** a lease expires and another worker takes over;
 - **Flaky sanctions vendor:** a step fails twice, waits, and succeeds on attempt 3;
 - **Sanctions vendor down:** a step fails on every attempt, and the run fails as "Out of attempts"; press **Resume from failed step** to redrive it;

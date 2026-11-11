@@ -13,8 +13,7 @@ CREATE TYPE step_run_status AS ENUM (
   'running',
   'succeeded',
   'failed',
-  'skipped',   -- never started, because the run failed
-  'cancelled'  -- was running when the run failed, and was told to stop
+  'skipped'    -- never started, because a step it depends on failed
 );
 
 -- Why a step, and so its run, failed. Statuses say what can happen next, and

@@ -92,6 +92,14 @@ export function ancestors(steps: StepLink[], name: string): Set<string> {
 }
 
 /**
+ * Every step that depends on a step, directly or through other steps: if that
+ * step fails for good, none of these can ever run.
+ */
+export function dependents(steps: StepLink[], name: string): Set<string> {
+  return new Set(steps.filter((s) => ancestors(steps, s.name).has(name)).map((s) => s.name));
+}
+
+/**
  * How far each step is from the start: 0 for a step that needs nothing, else
  * one more than the furthest step it needs. Steps at the same depth can run
  * side by side, so the dashboard lays them out in one column.
