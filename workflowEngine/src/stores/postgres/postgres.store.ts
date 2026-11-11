@@ -37,8 +37,23 @@ async function emit({
     .execute();
 }
 
-/** Hashes the parts of a workflow kept in the plan tables, so any edit creates a new version. */
+const versions = new WeakMap<WorkflowDefinition, string>();
+
+/**
+ * Hashes the parts of a workflow kept in the plan tables, so any edit creates a
+ * new version. Remembered per definition, since workers ask on every claim.
+ */
 function planVersion(definition: WorkflowDefinition): string {
+  let version = versions.get(definition);
+  if (!version) {
+    version = hashPlan(definition);
+    versions.set(definition, version);
+  }
+  return version;
+}
+
+/** The hash behind planVersion. */
+function hashPlan(definition: WorkflowDefinition): string {
   const plan = {
     name: definition.name,
     title: definition.title,
@@ -261,16 +276,16 @@ async function takeStep({
  */
 async function claimStep({
   workerId,
-  workflowNames,
+  workflows,
   order,
   defaults,
 }: {
   workerId: string;
-  workflowNames: string[];
+  workflows: WorkflowDefinition[];
   order: ClaimOrder;
   defaults: StepDefaults;
 }): Promise<Claim | null> {
-  if (workflowNames.length === 0) return null;
+  if (workflows.length === 0) return null;
 
   return db.transaction().execute(async (trx) => {
     let query = trx
@@ -281,7 +296,9 @@ async function claimStep({
       .where("sr.status", "=", "ready")
       // A step waiting to retry is ready, but not until its backoff is over.
       .where("sr.ready_at", "<=", sql<Date>`now()`)
-      .where("w.name", "in", workflowNames);
+      // The version is a hash that includes the name, so it picks out one
+      // workflow version: a worker never runs a step it has different code for.
+      .where("w.version", "in", workflows.map(planVersion));
     if (order === "oldest-run-first") query = query.orderBy("r.created_at").orderBy("r.id");
     const next = await query
       .orderBy("sr.ready_at")

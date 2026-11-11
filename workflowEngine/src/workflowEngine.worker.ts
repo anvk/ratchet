@@ -140,7 +140,7 @@ export async function runWorker({
 }) {
   const { pollMs, errorBackoffMs, claimOrder } = settings;
   const defaults = stepDefaults(settings);
-  const workflowNames = [...registry.keys()];
+  const workflows = [...registry.values()];
 
   /** Waits, but wakes up as soon as the worker is told to stop. */
   const wait = (ms: number) => sleep(ms, undefined, { signal: stopSignal }).catch(() => {});
@@ -153,7 +153,7 @@ export async function runWorker({
     try {
       let claim = await store.claimStep({
         workerId,
-        workflowNames,
+        workflows,
         order: claimOrder,
         defaults,
       });

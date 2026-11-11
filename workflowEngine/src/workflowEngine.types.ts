@@ -135,11 +135,13 @@ export interface WorkflowStore {
   }): Promise<string>;
   /**
    * Claims a ready step belonging to one of these workflows, choosing by order,
-   * or returns null if there is none. Two workers must never receive the same step.
+   * or returns null if there is none. Only runs started on the same version of
+   * a workflow count, so a worker never runs a step with different code from
+   * the run's plan. Two workers must never receive the same step.
    */
   claimStep(request: {
     workerId: string;
-    workflowNames: string[];
+    workflows: WorkflowDefinition[];
     order: ClaimOrder;
     defaults: StepDefaults;
   }): Promise<Claim | null>;

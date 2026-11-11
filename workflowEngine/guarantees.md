@@ -5,6 +5,10 @@ What the engine promises. Each guarantee is backed by a test in
 
 - **One worker holds a step at a time.** Competing workers never claim the same
   step at once.
+- **A worker only runs steps it has the same code for.** A run belongs to the
+  workflow version it started on, and workers only claim runs of versions they
+  have. During a deploy, old workers finish old runs and new workers take new
+  ones.
 - **A step whose worker disappears runs again.** Each claim comes with a lease,
   which the worker renews with heartbeats while the step runs. When a lease
   expires (the worker crashed, froze or lost its connection), the orchestrator

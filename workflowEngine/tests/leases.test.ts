@@ -129,7 +129,7 @@ test("a step's own leaseMs wins over the default, and the sticky handoff gets a 
 
   const claim = await store.claimStep({
     workerId: "test",
-    workflowNames: [leased.name],
+    workflows: [leased],
     order: "fair",
     defaults,
   });
@@ -158,7 +158,7 @@ test("a swept step can't be renewed or finished by the worker that lost it", asy
   const runId = await store.startRun({ definition: lost });
   const claim = await store.claimStep({
     workerId: "test",
-    workflowNames: [lost.name],
+    workflows: [lost],
     order: "fair",
     defaults,
   });
