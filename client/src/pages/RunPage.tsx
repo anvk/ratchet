@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { canRedrive } from "@ratchet/engine/utils";
+import { QUERY_KEYS } from "../queryKeys";
 import { isRunFinished } from "../utils/runs";
 import {
   fetchEvents,
@@ -69,7 +70,7 @@ export function RunPage() {
   const [picked, setPicked] = useState<string | null>(null);
 
   const { data, error } = useQuery({
-    queryKey: ["run", id],
+    queryKey: QUERY_KEYS.runs.details({ id }),
     queryFn: () => fetchRun(id),
     retry: false,
     // Finished runs can't change, so stop polling them.
@@ -82,7 +83,7 @@ export function RunPage() {
 
   const finished = data ? isRunFinished(data.run.status) : false;
   const { data: events } = useQuery({
-    queryKey: ["events", id, finished],
+    queryKey: QUERY_KEYS.runs.events({ id, finished }),
     queryFn: () => fetchEvents(id),
     enabled: !!data,
     refetchInterval: finished ? false : 500,
@@ -92,7 +93,10 @@ export function RunPage() {
   const redrive = useMutation({
     mutationFn: () => redriveRun(id),
     // The run is running again, so start polling it and its history.
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["run", id] }),
+    onSuccess: () =>
+      queryClient.invalidateQueries({
+        queryKey: QUERY_KEYS.runs.details({ id }),
+      }),
   });
 
   if (error) {

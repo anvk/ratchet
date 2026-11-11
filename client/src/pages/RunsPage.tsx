@@ -1,12 +1,23 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { WORKFLOW_RUN_STATUSES, type WorkflowRunStatus } from "@ratchet/engine/constants";
-import { fetchRuns, fetchWorkflows, startRun } from "../services/workflows.service";
+import {
+  WORKFLOW_RUN_STATUSES,
+  type WorkflowRunStatus,
+} from "@ratchet/engine/constants";
+import {
+  fetchRuns,
+  fetchWorkflows,
+  startRun,
+} from "../services/workflows.service";
 import { Age } from "../components/Age";
 import { Elapsed } from "../components/Elapsed";
 import { StatusBadge } from "../components/StatusBadge";
-import { FAILURE_REASON_LABELS, RUN_STATUS_LABELS } from "../constants/statuses";
+import {
+  FAILURE_REASON_LABELS,
+  RUN_STATUS_LABELS,
+} from "../constants/statuses";
+import { QUERY_KEYS } from "../queryKeys";
 import { URLS } from "../urls";
 import { Button } from "../components/Button";
 import { ErrorMessage } from "../components/ErrorMessage";
@@ -25,7 +36,8 @@ export function RunsPage() {
   const queryClient = useQueryClient();
   const [params] = useSearchParams();
   const requested = params.get("status") as WorkflowRunStatus | null;
-  const tab: WorkflowRunStatus | "all" = requested && TABS.includes(requested) ? requested : "all";
+  const tab: WorkflowRunStatus | "all" =
+    requested && TABS.includes(requested) ? requested : "all";
   const [cursors, setCursors] = useState<string[]>([]);
   const [workflowName, setWorkflowName] = useState<string | null>(null);
   const [presetIndex, setPresetIndex] = useState(0);
@@ -33,24 +45,33 @@ export function RunsPage() {
   const cursor = cursors.at(-1) ?? null;
 
   const { data, error } = useQuery({
-    queryKey: ["runs", tab, cursor],
+    queryKey: QUERY_KEYS.runs.list({ status: tab, cursor }),
     queryFn: () => fetchRuns(tab, cursor),
     refetchInterval: 2000,
   });
 
-  const { data: workflows } = useQuery({ queryKey: ["workflows"], queryFn: fetchWorkflows });
-  const workflow = workflows?.find((w) => w.name === workflowName) ?? workflows?.[0];
+  const { data: workflows } = useQuery({
+    queryKey: QUERY_KEYS.workflows.list(),
+    queryFn: fetchWorkflows,
+  });
+  const workflow =
+    workflows?.find((w) => w.name === workflowName) ?? workflows?.[0];
 
   // One run opens its page. Several stay on the list, so they can be watched together.
   const start = useMutation({
     mutationFn: () => {
       const input = workflow!.presets[presetIndex]?.input ?? {};
-      return Promise.all(Array.from({ length: runCount }, () => startRun(workflow!.name, input)));
+      return Promise.all(
+        Array.from({ length: runCount }, () => startRun(workflow!.name, input)),
+      );
     },
     onSuccess: (runs) => {
-      if (runs.length === 1) return navigate(URLS.runs.details({ id: runs[0].id }));
+      if (runs.length === 1)
+        return navigate(URLS.runs.details({ id: runs[0].id }));
       selectTab("all");
-      return queryClient.invalidateQueries({ queryKey: ["runs"] });
+      return queryClient.invalidateQueries({
+        queryKey: QUERY_KEYS.runs.lists(),
+      });
     },
   });
 
@@ -59,7 +80,9 @@ export function RunsPage() {
     navigate(URLS.runs.list({ status: next === "all" ? undefined : next }));
   }
 
-  const totalRuns = data ? Object.values(data.counts).reduce((a, b) => a + b, 0) : 0;
+  const totalRuns = data
+    ? Object.values(data.counts).reduce((a, b) => a + b, 0)
+    : 0;
 
   return (
     <>
@@ -121,7 +144,11 @@ export function RunsPage() {
               </option>
             ))}
           </Select>
-          <Button variant="primary" type="submit" disabled={!workflow || start.isPending}>
+          <Button
+            variant="primary"
+            type="submit"
+            disabled={!workflow || start.isPending}
+          >
             {start.isPending
               ? "Starting…"
               : runCount === 1
@@ -132,7 +159,8 @@ export function RunsPage() {
       </div>
       {start.error && (
         <ErrorMessage>
-          Could not start {runCount === 1 ? "the run" : "every run"}: {start.error.message}
+          Could not start {runCount === 1 ? "the run" : "every run"}:{" "}
+          {start.error.message}
         </ErrorMessage>
       )}
 
@@ -158,7 +186,9 @@ export function RunsPage() {
         ))}
       </div>
 
-      {error && <ErrorMessage>Could not reach the API: {error.message}</ErrorMessage>}
+      {error && (
+        <ErrorMessage>Could not reach the API: {error.message}</ErrorMessage>
+      )}
 
       <div className="overflow-x-auto rounded-lg border border-line bg-surface">
         <table className="w-full whitespace-nowrap">
@@ -219,12 +249,17 @@ export function RunsPage() {
 
       {(cursors.length > 0 || data?.next_cursor) && (
         <div className="mt-3 flex justify-end gap-2">
-          <Button disabled={cursors.length === 0} onClick={() => setCursors(cursors.slice(0, -1))}>
+          <Button
+            disabled={cursors.length === 0}
+            onClick={() => setCursors(cursors.slice(0, -1))}
+          >
             Newer
           </Button>
           <Button
             disabled={!data?.next_cursor}
-            onClick={() => data?.next_cursor && setCursors([...cursors, data.next_cursor])}
+            onClick={() =>
+              data?.next_cursor && setCursors([...cursors, data.next_cursor])
+            }
           >
             Older
           </Button>
@@ -236,5 +271,9 @@ export function RunsPage() {
 
 /** The number next to each tab's label. */
 function Count({ children }: { children: number }) {
-  return <span className="ml-0.5 font-mono text-xs/normal text-muted">{children}</span>;
+  return (
+    <span className="ml-0.5 font-mono text-xs/normal text-muted">
+      {children}
+    </span>
+  );
 }
