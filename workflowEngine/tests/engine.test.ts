@@ -135,9 +135,7 @@ test("an engine rejects two workflows with the same name", () => {
 test("workers only claim steps from workflows they know", async () => {
   const foreign = defineWorkflow({
     name: "foreign",
-    title: "Foreign",
-    description: "Belongs to a different engine.",
-    steps: [{ name: "only", title: "Only", description: "A step.", run: async () => null }],
+    steps: [{ name: "only", run: async () => null }],
   });
   await store.syncWorkflows([foreign]);
   const runId = await store.startRun({ definition: foreign });
@@ -162,7 +160,10 @@ test("workers only claim steps from workflows they know", async () => {
 
 test("workers only claim runs of a workflow version they have", async () => {
   // Same name, edited plan: like a run started by a newer deploy.
-  const edited = { ...pipeline, title: "Pipeline, edited" };
+  const edited = {
+    ...pipeline,
+    steps: pipeline.steps.map((step, i) => (i === 0 ? { ...step, leaseMs: 12_345 } : step)),
+  };
   await store.syncWorkflows([edited]);
   const runId = await store.startRun({ definition: edited });
 
@@ -186,33 +187,31 @@ test("workers only claim runs of a workflow version they have", async () => {
 });
 
 test("editing a workflow leaves earlier runs on the version they started with", async () => {
-  /** Builds the same workflow with a different step title, so it hashes to a new version. */
-  const version = (title: string) =>
+  /** Builds the same workflow with a different step lease, so it hashes to a new version. */
+  const version = (leaseMs: number) =>
     defineWorkflow({
       name: "versioned",
-      title: "Versioned",
-      description: "Changes between versions.",
-      steps: [{ name: "only", title, description: "A step.", run: async () => null }],
+      steps: [{ name: "only", leaseMs, run: async () => null }],
     });
-  /** The title in the plan for a run's only step. */
-  const stepTitle = (runId: string) =>
+  /** The lease in the plan for a run's only step. */
+  const stepLeaseMs = (runId: string) =>
     db
       .selectFrom("step_runs as sr")
       .innerJoin("steps as s", "s.id", "sr.step_id")
-      .select("s.title")
+      .select("s.lease_ms")
       .where("sr.run_id", "=", runId)
       .executeTakeFirstOrThrow();
 
-  const before = version("Before");
+  const before = version(1000);
   await store.syncWorkflows([before]);
   const oldRun = await store.startRun({ definition: before });
 
-  const edited = version("After");
+  const edited = version(2000);
   await store.syncWorkflows([edited]);
   const newRun = await store.startRun({ definition: edited });
 
-  assert.equal((await stepTitle(oldRun)).title, "Before");
-  assert.equal((await stepTitle(newRun)).title, "After");
+  assert.equal((await stepLeaseMs(oldRun)).lease_ms, 1000);
+  assert.equal((await stepLeaseMs(newRun)).lease_ms, 2000);
 });
 
 test("engine.startRun starts a run by workflow name, and rejects a name it doesn't have", async () => {

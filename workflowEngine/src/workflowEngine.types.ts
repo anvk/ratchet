@@ -25,12 +25,10 @@ export interface StepContext<Input = any> {
   signal: AbortSignal;
 }
 
-/** One step of a workflow: how to describe it, and the code to run. */
+/** One step of a workflow: its name, how it runs, and the code to run. */
 export interface StepDefinition<Input = any> {
   /** Stable identifier, unique within the workflow. */
   name: string;
-  title: string;
-  description: string;
   /**
    * Steps that must succeed before this one starts. Steps whose needs are met
    * run side by side. Defaults to the step listed before it, so steps without
@@ -63,8 +61,6 @@ export interface StepDefinition<Input = any> {
 export interface WorkflowDefinition<Input = any> {
   /** Stable identifier, unique within the registry. */
   name: string;
-  title: string;
-  description: string;
   /** Each step is listed after the steps it needs. */
   steps: StepDefinition<Input>[];
 }

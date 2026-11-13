@@ -64,14 +64,12 @@ export interface StepRuns {
 
 export interface Steps {
   backoff_ms: number | null;
-  description: string;
   id: Generated<string>;
   lease_ms: number | null;
   max_attempts: number | null;
   name: string;
   needs: Generated<string[]>;
   position: number;
-  title: string;
   workflow_id: string;
 }
 
@@ -89,10 +87,8 @@ export interface WorkflowRuns {
 
 export interface Workflows {
   created_at: Generated<Timestamp>;
-  description: string;
   id: Generated<string>;
   name: string;
-  title: string;
   version: string;
 }
 

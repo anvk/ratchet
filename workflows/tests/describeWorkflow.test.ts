@@ -26,17 +26,23 @@ test("labels hold the workflow's text and one entry per step, by name", () => {
   });
 });
 
-test("the definition keeps the name, the steps' order and their run functions", () => {
+test("the definition keeps the name, the steps' order and their run functions", async () => {
   assert.equal(definition.name, "demo");
   assert.deepEqual(
     definition.steps.map((step) => step.name),
     ["first-step", "second-step"],
   );
-  assert.deepEqual(
-    Object.values(definition.steps)
-      .map(Object.values)
-      .flat()
-      .filter((v) => typeof v === "function"),
-    [first, second],
-  );
+  assert.deepEqual(await Promise.all(definition.steps.map((step) => step.run({} as never))), [
+    { ok: true },
+    { ok: false },
+  ]);
+});
+
+test("the definition has no title or description, on the workflow or any step", () => {
+  assert.equal("title" in definition, false);
+  assert.equal("description" in definition, false);
+  for (const step of definition.steps) {
+    assert.equal("title" in step, false);
+    assert.equal("description" in step, false);
+  }
 });

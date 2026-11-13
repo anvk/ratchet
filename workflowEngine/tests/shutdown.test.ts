@@ -59,13 +59,9 @@ async function engineWithRunningStep(settings?: Partial<WorkflowEngineSettings>)
 
   const slow = defineWorkflow({
     name: "slow",
-    title: "Slow",
-    description: "Runs until released.",
     steps: [
       {
         name: "slow",
-        title: "Slow",
-        description: "Runs until released.",
         async run() {
           started();
           await stepReleased;
