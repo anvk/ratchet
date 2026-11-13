@@ -74,6 +74,9 @@ export interface Steps {
 }
 
 export interface WorkflowRuns {
+  admitted_at: Timestamp | null;
+  concurrency_key: string | null;
+  concurrency_limit: number | null;
   created_at: Generated<Timestamp>;
   failure_reason: FailureReason | null;
   finished_at: Timestamp | null;

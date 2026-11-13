@@ -117,10 +117,12 @@ async function startRun({
   definition,
   input = {},
   idempotencyKey,
+  concurrency,
 }: {
   definition: WorkflowDefinition;
   input?: unknown;
   idempotencyKey?: string;
+  concurrency?: { key: string; limit: number };
 }): Promise<string> {
   return db.transaction().execute(async (trx) => {
     const workflow = await trx
@@ -143,6 +145,11 @@ async function startRun({
         workflow_id: workflow.id,
         input: JSON.stringify(input),
         idempotency_key: idempotencyKey ?? null,
+        concurrency_key: concurrency?.key ?? null,
+        concurrency_limit: concurrency?.limit ?? null,
+        // Not now(), which is the transaction's start time and can be earlier
+        // than the moment the run was actually admitted.
+        admitted_at: sql<Date>`clock_timestamp()`,
       })
       // Handles two identical requests racing: the loser waits, then does nothing.
       .onConflict((oc) => oc.column("idempotency_key").doNothing())

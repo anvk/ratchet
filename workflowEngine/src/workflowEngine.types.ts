@@ -57,10 +57,26 @@ export interface StepDefinition<Input = any> {
   run(ctx: StepContext<Input>): Promise<unknown>;
 }
 
+/**
+ * Limits how many of a workflow's runs are in progress at once. Each run's key
+ * puts it in a group, and only `limit` runs of a group are in progress together.
+ */
+export interface WorkflowConcurrency<Input = any> {
+  /**
+   * Computed from a run's input when it starts. Runs with the same key form a
+   * group. Null puts the run in no group, so it never waits.
+   */
+  key: (input: Input) => string | null;
+  /** How many runs of a group may be in progress at once. The rest wait for one to finish, oldest first. */
+  limit: number;
+}
+
 /** A workflow as its author writes it, passed to defineWorkflow. */
 export interface WorkflowDefinition<Input = any> {
   /** Stable identifier, unique within the registry. */
   name: string;
+  /** Keeps runs that share a key from overlapping. Runs are not limited by default. */
+  concurrency?: WorkflowConcurrency<Input>;
   /** Each step is listed after the steps it needs. */
   steps: StepDefinition<Input>[];
 }
@@ -130,11 +146,15 @@ export interface WorkflowStore {
    * claim, and returns the run's id.
    * If the caller's idempotencyKey was already used, creates nothing and returns
    * the existing run's id.
+   * With `concurrency`, the run is admitted only if fewer than `limit` runs with
+   * that key are in progress; otherwise it is created waiting, with no step
+   * ready, until one finishes.
    */
   startRun(request: {
     definition: WorkflowDefinition;
     input?: unknown;
     idempotencyKey?: string;
+    concurrency?: { key: string; limit: number };
   }): Promise<string>;
   /**
    * Claims a ready step belonging to one of these workflows, choosing by order,
@@ -247,7 +267,8 @@ export interface WorkflowEngine {
   /**
    * Starts a run of one of this engine's workflows, by name, and returns its
    * id. Throws UnknownWorkflowError, creating nothing, for any other name. See
-   * WorkflowStore.startRun for idempotencyKey.
+   * WorkflowStore.startRun for idempotencyKey. A run of a workflow with
+   * `concurrency` may wait for a slot before any of its steps run.
    */
   startRun(request: {
     workflow: string;
