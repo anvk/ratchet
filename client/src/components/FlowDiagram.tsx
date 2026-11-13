@@ -59,11 +59,11 @@ const nodeTypes = { step: StepCard };
 
 export function FlowDiagram({
   steps,
-  selected,
+  selectedStepName,
   onSelect,
 }: {
   steps: Step[];
-  selected: string | null;
+  selectedStepName: string | null;
   onSelect: (name: string) => void;
 }) {
   // One column per depth, so steps that can run side by side are stacked,
@@ -79,7 +79,7 @@ export function FlowDiagram({
       id: step.name,
       type: "step",
       position: { x: depth * COLUMN_WIDTH, y: (row - (column.length - 1) / 2) * ROW_HEIGHT },
-      data: { step, selected: step.name === selected },
+      data: { step, selected: step.name === selectedStepName },
     })),
   );
 

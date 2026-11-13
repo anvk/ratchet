@@ -61,7 +61,7 @@ function StepDetail({ step }: { step: Step }) {
 
 export function RunPage() {
   const { id = "" } = useParams();
-  const [picked, setPicked] = useState<string | null>(null);
+  const [pickedStepName, setPickedStepName] = useState<string | null>(null);
 
   const { data, error } = useRun({ id });
   const finished = data ? isRunFinished(data.run.status) : false;
@@ -79,9 +79,10 @@ export function RunPage() {
   if (!data) return <p className="p-8 text-center text-muted">Loading…</p>;
 
   const { run, steps } = data;
-  const active = steps.find((s) => s.status === "running");
-  const failed = steps.find((s) => s.status === "failed");
-  const selected = steps.find((s) => s.name === picked) ?? active ?? failed ?? steps.at(-1)!;
+  const runningStep = steps.find((s) => s.status === "running");
+  const failedStep = steps.find((s) => s.status === "failed");
+  const selectedStep =
+    steps.find((s) => s.name === pickedStepName) ?? runningStep ?? failedStep ?? steps.at(-1)!;
 
   return (
     <>
@@ -120,10 +121,14 @@ export function RunPage() {
       )}
       <p className="mt-0.5 mb-4 text-muted">{run.workflow_description}</p>
 
-      <FlowDiagram steps={steps} selected={selected.name} onSelect={setPicked} />
+      <FlowDiagram
+        steps={steps}
+        selectedStepName={selectedStep.name}
+        onSelect={setPickedStepName}
+      />
 
       <div className="mt-4 grid grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)] gap-4 max-[720px]:grid-cols-1">
-        <StepDetail step={selected} />
+        <StepDetail step={selectedStep} />
         <Panel>
           <h2 className="mb-3 font-semibold">Events</h2>
           <ol>

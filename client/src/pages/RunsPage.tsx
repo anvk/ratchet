@@ -16,7 +16,7 @@ import { Select } from "../components/Select";
 const TABS = WORKFLOW_RUN_STATUSES;
 
 /** Shared by every table cell. */
-const CELL = "border-b border-line px-3.5 py-2.25 text-left";
+const CELL_CLASSES = "border-b border-line px-3.5 py-2.25 text-left";
 
 /** How many runs the Start button can start at once. */
 const RUN_COUNTS = [1, 5, 10, 25, 50];
@@ -24,8 +24,9 @@ const RUN_COUNTS = [1, 5, 10, 25, 50];
 export function RunsPage() {
   const navigate = useNavigate();
   const [params] = useSearchParams();
-  const requested = params.get("status") as WorkflowRunStatus | null;
-  const tab: WorkflowRunStatus | "all" = requested && TABS.includes(requested) ? requested : "all";
+  const requestedStatus = params.get("status") as WorkflowRunStatus | null;
+  const tab: WorkflowRunStatus | "all" =
+    requestedStatus && TABS.includes(requestedStatus) ? requestedStatus : "all";
   const [cursors, setCursors] = useState<string[]>([]);
   const [workflowName, setWorkflowName] = useState<string | null>(null);
   const [presetIndex, setPresetIndex] = useState(0);
@@ -162,12 +163,12 @@ export function RunsPage() {
         <table className="w-full whitespace-nowrap">
           <thead className="text-xs/normal text-muted [&_th]:font-medium">
             <tr>
-              <th className={CELL}>Run</th>
-              <th className={CELL}>Workflow</th>
-              <th className={CELL}>Status</th>
-              <th className={CELL}>Progress</th>
-              <th className={CELL}>Created</th>
-              <th className={CELL}>Duration</th>
+              <th className={CELL_CLASSES}>Run</th>
+              <th className={CELL_CLASSES}>Workflow</th>
+              <th className={CELL_CLASSES}>Status</th>
+              <th className={CELL_CLASSES}>Progress</th>
+              <th className={CELL_CLASSES}>Created</th>
+              <th className={CELL_CLASSES}>Duration</th>
             </tr>
           </thead>
           <tbody>
@@ -177,7 +178,7 @@ export function RunsPage() {
                 className="cursor-pointer hover:bg-grey-soft last:*:border-b-0"
                 onClick={() => navigate(URLS.runs.details({ id: run.id }))}
               >
-                <td className={CELL}>
+                <td className={CELL_CLASSES}>
                   <Link
                     className="font-mono text-[13px]"
                     to={URLS.runs.details({ id: run.id })}
@@ -186,8 +187,8 @@ export function RunsPage() {
                     {run.id.slice(0, 8)}
                   </Link>
                 </td>
-                <td className={CELL}>{run.workflow_title}</td>
-                <td className={CELL}>
+                <td className={CELL_CLASSES}>{run.workflow_title}</td>
+                <td className={CELL_CLASSES}>
                   <StatusBadge status={run.status} />
                   {run.failure_reason && (
                     <span className="ml-2 text-xs text-muted">
@@ -195,13 +196,13 @@ export function RunsPage() {
                     </span>
                   )}
                 </td>
-                <td className={`${CELL} font-mono text-[13px]`}>
+                <td className={`${CELL_CLASSES} font-mono text-[13px]`}>
                   {run.steps_done}/{run.steps_total}
                 </td>
-                <td className={CELL}>
+                <td className={CELL_CLASSES}>
                   <Age at={run.created_at} />
                 </td>
-                <td className={`${CELL} font-mono text-[13px]`}>
+                <td className={`${CELL_CLASSES} font-mono text-[13px]`}>
                   <Elapsed start={run.started_at} end={run.finished_at} />
                 </td>
               </tr>

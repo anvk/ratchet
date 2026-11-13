@@ -23,23 +23,23 @@ function startHeartbeat({
   workerId: string;
   claim: Claim;
 }) {
-  const lost = new AbortController();
+  const leaseLost = new AbortController();
   const timer = setInterval(() => {
     store
       .extendLease(claim)
       .then((owned) => {
-        if (owned || lost.signal.aborted) return;
+        if (owned || leaseLost.signal.aborted) return;
         console.log(
           `[${workerId}] ${claim.stepName} is no longer this worker's (attempt ${claim.attempt})`,
         );
         clearInterval(timer);
-        lost.abort();
+        leaseLost.abort();
       })
       // A failed renewal isn't fatal: the next one may work. If they all fail,
       // the lease expires and the orchestrator gives the step to another worker.
       .catch((err) => console.error(`[${workerId}] heartbeat failed:`, err));
   }, claim.leaseMs / 3);
-  return { signal: lost.signal, stop: () => clearInterval(timer) };
+  return { signal: leaseLost.signal, stop: () => clearInterval(timer) };
 }
 
 /**
