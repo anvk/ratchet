@@ -25,7 +25,7 @@ async function emit({
   trx,
   runId,
   type,
-  step,
+  stepName,
   attempt,
   workerId,
   detail,
@@ -34,7 +34,7 @@ async function emit({
     .insertInto("events")
     .values({
       run_id: runId,
-      step_name: step ?? null,
+      step_name: stepName ?? null,
       type,
       attempt: attempt ?? null,
       worker_id: workerId ?? null,
@@ -43,24 +43,24 @@ async function emit({
     .execute();
 }
 
-const versions = new WeakMap<WorkflowDefinition, string>();
+const planVersions = new WeakMap<WorkflowDefinition, string>();
 
 /**
  * Hashes the parts of a workflow kept in the plan tables, so any edit creates a
  * new version. Remembered per definition, since workers ask on every claim.
  */
 function planVersion(definition: WorkflowDefinition): string {
-  let version = versions.get(definition);
+  let version = planVersions.get(definition);
   if (!version) {
     version = hashPlan(definition);
-    versions.set(definition, version);
+    planVersions.set(definition, version);
   }
   return version;
 }
 
 /** The hash behind planVersion. */
 function hashPlan(definition: WorkflowDefinition): string {
-  const needs = resolveNeeds(definition.steps);
+  const links = resolveNeeds(definition.steps);
   const plan = {
     name: definition.name,
     title: definition.title,
@@ -70,7 +70,7 @@ function hashPlan(definition: WorkflowDefinition): string {
         name,
         title,
         description,
-        needs: needs[i].needs,
+        needs: links[i].needs,
         leaseMs,
         maxAttempts,
         backoffMs,
@@ -98,7 +98,7 @@ async function syncWorkflows(workflows: WorkflowDefinition[]) {
         .executeTakeFirst();
       if (!created) return;
 
-      const needs = resolveNeeds(definition.steps);
+      const links = resolveNeeds(definition.steps);
       await trx
         .insertInto("steps")
         .values(
@@ -108,7 +108,7 @@ async function syncWorkflows(workflows: WorkflowDefinition[]) {
             title: step.title,
             description: step.description,
             position,
-            needs: needs[position].needs,
+            needs: links[position].needs,
             lease_ms: step.leaseMs ?? null,
             max_attempts: step.maxAttempts ?? null,
             backoff_ms: step.backoffMs ?? null,
@@ -186,7 +186,7 @@ async function startRun({
       )
       .execute();
     for (const step of steps.filter((s) => s.needs.length === 0)) {
-      await emit({ trx, runId: run.id, type: "step_ready", step: step.name });
+      await emit({ trx, runId: run.id, type: "step_ready", stepName: step.name });
     }
 
     return run.id;
@@ -248,7 +248,7 @@ async function takeStep({
     trx,
     runId: step.run_id,
     type: "step_claimed",
-    step: step.name,
+    stepName: step.name,
     attempt: step.attempt,
     workerId,
   });
@@ -267,8 +267,8 @@ async function takeStep({
     .select(["name", "needs", "output"])
     .where("run_id", "=", step.run_id)
     .execute();
-  const dependsOn = ancestors(runSteps, step.name);
-  const earlier = runSteps.filter((s) => dependsOn.has(s.name));
+  const ancestorNames = ancestors(runSteps, step.name);
+  const ancestorSteps = runSteps.filter((s) => ancestorNames.has(s.name));
 
   return {
     stepRunId: step.id,
@@ -280,7 +280,7 @@ async function takeStep({
     runId: step.run_id,
     workflow: run.workflow,
     input: run.input,
-    outputs: Object.fromEntries(earlier.map((s) => [s.name, s.output])),
+    outputs: Object.fromEntries(ancestorSteps.map((s) => [s.name, s.output])),
   };
 }
 
@@ -384,17 +384,17 @@ async function lockRun({ trx, runId }: { trx: Tx; runId: string }) {
 
 /**
  * Readies every pending step of a run whose needs have all succeeded, and
- * returns them in order. With `finished`, only steps that need that step,
+ * returns them in order. With `finishedStep`, only steps that need that step,
  * since nothing else can have changed. Call it with the run locked.
  */
 async function readyUnblockedSteps({
   trx,
   runId,
-  finished,
+  finishedStep,
 }: {
   trx: Tx;
   runId: string;
-  finished?: string;
+  finishedStep?: string;
 }) {
   let query = trx
     .updateTable("step_runs as sr")
@@ -413,10 +413,10 @@ async function readyUnblockedSteps({
         ),
       ),
     );
-  if (finished) query = query.where(sql<boolean>`${finished} = ANY(sr.needs)`);
+  if (finishedStep) query = query.where(sql<boolean>`${finishedStep} = ANY(sr.needs)`);
   const ready = await query.returning(["sr.id", "sr.name", "sr.position"]).execute();
   for (const step of ready.sort((a, b) => a.position - b.position)) {
-    await emit({ trx, runId, type: "step_ready", step: step.name });
+    await emit({ trx, runId, type: "step_ready", stepName: step.name });
   }
   return ready;
 }
@@ -446,14 +446,18 @@ async function completeStep({
       trx,
       runId: claim.runId,
       type: "step_succeeded",
-      step: claim.stepName,
+      stepName: claim.stepName,
       attempt: claim.attempt,
       workerId: claim.workerId,
     });
 
     // The join. Without the run lock, two steps finishing together would each
     // see the other as still running, and neither would ready a step that needs both.
-    const ready = await readyUnblockedSteps({ trx, runId: claim.runId, finished: claim.stepName });
+    const ready = await readyUnblockedSteps({
+      trx,
+      runId: claim.runId,
+      finishedStep: claim.stepName,
+    });
     if (ready.length > 0) {
       if (!claimNext) return { completed: true, next: null };
       // Still inside this transaction, so no other worker ever sees it ready.
@@ -526,17 +530,25 @@ async function finishRunIfDone({ trx, runId }: { trx: Tx; runId: string }) {
     return;
   }
 
-  const first = failed[0];
+  const firstFailed = failed[0];
   await trx
     .updateTable("workflow_runs")
-    .set({ status: "failed", failure_reason: first.failure_reason, finished_at: sql<Date>`now()` })
+    .set({
+      status: "failed",
+      failure_reason: firstFailed.failure_reason,
+      finished_at: sql<Date>`now()`,
+    })
     .where("id", "=", runId)
     .execute();
   await emit({
     trx,
     runId,
     type: "run_failed",
-    detail: { step: first.name, error: first.error, failureReason: first.failure_reason },
+    detail: {
+      step: firstFailed.name,
+      error: firstFailed.error,
+      failureReason: firstFailed.failure_reason,
+    },
   });
 }
 
@@ -567,7 +579,7 @@ async function recordFinalFailure({
     trx,
     runId,
     type: "step_failed",
-    step: stepName,
+    stepName,
     attempt,
     workerId,
     detail: { error, failureReason },
@@ -590,7 +602,8 @@ async function recordFinalFailure({
       .returning(["name", "position"])
       .execute();
     skipped.sort((a, b) => a.position - b.position);
-    for (const step of skipped) await emit({ trx, runId, type: "step_skipped", step: step.name });
+    for (const step of skipped)
+      await emit({ trx, runId, type: "step_skipped", stepName: step.name });
   }
 
   await finishRunIfDone({ trx, runId });
@@ -647,7 +660,7 @@ async function failStep({
         trx,
         runId: claim.runId,
         type: "step_retry_scheduled",
-        step: claim.stepName,
+        stepName: claim.stepName,
         attempt: claim.attempt,
         workerId: claim.workerId,
         detail: { error, retryInMs },
@@ -725,7 +738,7 @@ async function sweepExpiredLeases({ defaults }: { defaults: StepDefaults }): Pro
         trx,
         runId: step.run_id,
         type: "step_lease_expired",
-        step: step.name,
+        stepName: step.name,
         attempt: step.attempt,
         workerId,
       });
@@ -773,7 +786,7 @@ async function sweepExpiredLeases({ defaults }: { defaults: StepDefaults }): Pro
         })
         .where("id", "=", step.id)
         .execute();
-      await emit({ trx, runId: step.run_id, type: "step_ready", step: step.name });
+      await emit({ trx, runId: step.run_id, type: "step_ready", stepName: step.name });
       return true;
     });
     if (handled) swept++;

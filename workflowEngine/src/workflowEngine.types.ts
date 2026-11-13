@@ -112,7 +112,7 @@ export interface Claim {
 /** Optional details on a row in the events table. */
 export interface EventFields {
   /** Step name. Left out for run-level events like run_started. */
-  step?: string;
+  stepName?: string;
   attempt?: number;
   workerId?: string;
   /** Extra JSON, such as a failed step's error message. */

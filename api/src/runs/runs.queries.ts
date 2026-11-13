@@ -36,8 +36,8 @@ export async function listRuns({
       eb.fn
         .coalesce(
           eb
-            .selectFrom("step_runs as s")
-            .whereRef("s.run_id", "=", "r.id")
+            .selectFrom("step_runs as sr")
+            .whereRef("sr.run_id", "=", "r.id")
             .select(sql<number>`count(*)::int`.as("n")),
           sql<number>`0`,
         )
@@ -45,9 +45,9 @@ export async function listRuns({
       eb.fn
         .coalesce(
           eb
-            .selectFrom("step_runs as s")
-            .whereRef("s.run_id", "=", "r.id")
-            .where("s.status", "=", "succeeded")
+            .selectFrom("step_runs as sr")
+            .whereRef("sr.run_id", "=", "r.id")
+            .where("sr.status", "=", "succeeded")
             .select(sql<number>`count(*)::int`.as("n")),
           sql<number>`0`,
         )
