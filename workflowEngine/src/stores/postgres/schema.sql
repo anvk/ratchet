@@ -32,8 +32,6 @@ CREATE TABLE workflows (
   id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   name        text NOT NULL,
   version     text NOT NULL, -- hash of the definition
-  title       text NOT NULL,
-  description text NOT NULL,
   created_at  timestamptz NOT NULL DEFAULT now(),
   UNIQUE (name, version)
 );
@@ -42,8 +40,6 @@ CREATE TABLE steps (
   id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   workflow_id uuid NOT NULL REFERENCES workflows (id) ON DELETE CASCADE,
   name        text NOT NULL,
-  title       text NOT NULL,
-  description text NOT NULL,
   position    int  NOT NULL,
   -- Steps that must succeed before this one can start. They always come
   -- earlier in position, so the steps can't form a loop.

@@ -21,14 +21,29 @@ export interface Preset<Input extends object = object> {
   input: Input;
 }
 
-/** A workflow that can be started, from the registry. `GET /workflows` */
+/**
+ * The display text the dashboard shows for a workflow and its steps. Not part of
+ * the engine: the app serving the API passes labels in, by workflow name.
+ */
+export interface WorkflowLabels {
+  title: string;
+  description: string;
+  /** By step name. */
+  steps: Record<string, { title: string; description: string }>;
+}
+
+/**
+ * A workflow that can be started, from the registry. Titles and descriptions
+ * come from the app's labels; without them the title is made from the name and
+ * the description is null. `GET /workflows`
+ */
 export interface WorkflowInfo {
   name: string;
   title: string;
-  description: string;
+  description: string | null;
   /** Empty if the app gave none for this workflow. */
   presets: Preset[];
-  steps: { name: string; title: string; description: string }[];
+  steps: { name: string; title: string; description: string | null }[];
 }
 
 export interface WorkflowsResponse {
@@ -70,11 +85,11 @@ export interface RunsResponse {
   counts: Record<WorkflowRunStatus, number>;
 }
 
-/** A step of a run, with the title and description from the plan the run started with. */
+/** A step of a run, with the title and description from the app's labels, or a title made from its name. */
 export interface Step {
   name: string;
   title: string;
-  /** Null for a step added at runtime, which has no plan row. */
+  /** Null if the app's labels have none for this step. */
   description: string | null;
   position: number;
   /** Steps that must succeed before this one starts. */
@@ -96,7 +111,7 @@ export interface RunDetail {
   run: Omit<RunSummary, "steps_total" | "steps_done"> & {
     input: unknown;
     workflow_version: string;
-    workflow_description: string;
+    workflow_description: string | null;
   };
   steps: Step[];
 }

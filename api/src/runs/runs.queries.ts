@@ -21,7 +21,6 @@ export async function listRuns({
     .select((eb) => [
       "r.id",
       "w.name as workflow",
-      "w.title as workflow_title",
       "r.status",
       "r.failure_reason",
       "r.created_at",
@@ -97,8 +96,6 @@ export async function getRun(id: string) {
       "r.finished_at",
       "w.name as workflow",
       "w.version as workflow_version",
-      "w.title as workflow_title",
-      "w.description as workflow_description",
     ])
     .where("r.id", "=", id)
     .executeTakeFirst();
@@ -106,12 +103,8 @@ export async function getRun(id: string) {
 
   const steps = await db
     .selectFrom("step_runs as sr")
-    .leftJoin("steps as s", "s.id", "sr.step_id")
     .select([
       "sr.name",
-      // A step added at runtime has no plan row to take a title from.
-      sql<string>`coalesce(s.title, sr.name)`.as("title"),
-      "s.description",
       "sr.position",
       "sr.needs",
       "sr.status",

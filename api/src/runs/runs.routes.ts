@@ -7,15 +7,21 @@ import type {
   RunsResponse,
   StartRunResponse,
 } from "../api.types.ts";
-import { toJson } from "../api.utils.ts";
+import type { ApiOptions } from "../app.ts";
+import { stepLabel, toJson, workflowLabel } from "../api.utils.ts";
 import { getRun, listRunEvents, listRuns } from "./runs.queries.ts";
 import { listRunsQuery, runParams, startRunBody } from "./runs.schemas.ts";
 
 /**
  * Starting runs and reading them back. Reads go straight to the database;
  * starting a run goes through the engine, so its transaction and events stay intact.
+ * Titles and descriptions come from the app's labels, not the database.
  */
-export function runsRoutes(app: FastifyInstance, engine: WorkflowEngine) {
+export function runsRoutes({
+  app,
+  engine,
+  labels,
+}: { app: FastifyInstance; engine: WorkflowEngine } & Pick<ApiOptions, "labels">) {
   app.post("/runs", async (req, reply) => {
     const { workflow, input, idempotency_key } = startRunBody.parse(req.body);
     try {
@@ -33,9 +39,16 @@ export function runsRoutes(app: FastifyInstance, engine: WorkflowEngine) {
     }
   });
 
-  app.get("/runs", async (req): Promise<RunsResponse> =>
-    toJson(await listRuns(listRunsQuery.parse(req.query))),
-  );
+  app.get("/runs", async (req): Promise<RunsResponse> => {
+    const { runs, ...rest } = await listRuns(listRunsQuery.parse(req.query));
+    return toJson({
+      ...rest,
+      runs: runs.map((run) => ({
+        ...run,
+        workflow_title: workflowLabel({ labels, workflow: run.workflow }).title,
+      })),
+    });
+  });
 
   app.get("/runs/:id", async (req, reply) => {
     const { id } = runParams.parse(req.params);
@@ -44,7 +57,14 @@ export function runsRoutes(app: FastifyInstance, engine: WorkflowEngine) {
       const body: ErrorResponse = { error: "Run not found" };
       return reply.code(404).send(body);
     }
-    const body: RunDetail = toJson(run);
+    const { title, description } = workflowLabel({ labels, workflow: run.run.workflow });
+    const body: RunDetail = toJson({
+      run: { ...run.run, workflow_title: title, workflow_description: description },
+      steps: run.steps.map((step) => ({
+        ...step,
+        ...stepLabel({ labels, workflow: run.run.workflow, step: step.name }),
+      })),
+    });
     return body;
   });
 

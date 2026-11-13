@@ -10,8 +10,6 @@ interface PipelineInput {
 function step(name: string, value: (outputs: Record<string, { total: number }>) => number) {
   return {
     name,
-    title: name,
-    description: `Test step ${name}`,
     async run(ctx: { input: PipelineInput; outputs: Record<string, any>; idempotencyKey: string }) {
       if (ctx.input.failAt === name) throw new NonRetryableError(`${name} failed`);
       return { total: value(ctx.outputs), idempotencyKey: ctx.idempotencyKey };
@@ -22,8 +20,6 @@ function step(name: string, value: (outputs: Record<string, { total: number }>) 
 /** Three steps, each adding one to the previous step's output. */
 export const pipeline = defineWorkflow<PipelineInput>({
   name: "pipeline",
-  title: "Pipeline",
-  description: "Three steps that pass a running total along.",
   steps: [
     step("first", () => 1),
     step("second", (outputs) => outputs.first.total + 1),
@@ -44,13 +40,9 @@ interface SlowInput {
  */
 export const slow = defineWorkflow<SlowInput>({
   name: "slow",
-  title: "Slow",
-  description: "A short-leased step whose first attempt takes a while.",
   steps: [
     {
       name: "work",
-      title: "Work",
-      description: "Slow on the first attempt.",
       leaseMs: 300,
       async run(ctx) {
         if (ctx.attempt === 1) {
@@ -65,7 +57,7 @@ export const slow = defineWorkflow<SlowInput>({
         return { attempt: ctx.attempt, leaseLost: ctx.signal.aborted };
       },
     },
-    { name: "done", title: "Done", description: "Runs after work.", run: async () => null },
+    { name: "done", run: async () => null },
   ],
 });
 
@@ -79,19 +71,13 @@ interface FlakyInput {
 /** A step that fails its first few attempts, with quick retries, between two plain steps. */
 export const flaky = defineWorkflow<FlakyInput>({
   name: "flaky",
-  title: "Flaky",
-  description: "Fails a set number of times, then succeeds.",
   steps: [
     {
       name: "prepare",
-      title: "Prepare",
-      description: "Succeeds at once, so a redrive must not run it again.",
       run: async () => ({ prepared: true }),
     },
     {
       name: "call",
-      title: "Call",
-      description: "Like a call to an unreliable service.",
       maxAttempts: 4,
       backoffMs: 50,
       async run(ctx) {
@@ -104,8 +90,6 @@ export const flaky = defineWorkflow<FlakyInput>({
     },
     {
       name: "after",
-      title: "After",
-      description: "Runs once call succeeds.",
       run: async () => null,
     },
   ],
@@ -114,13 +98,9 @@ export const flaky = defineWorkflow<FlakyInput>({
 /** A step that blocks its worker past its lease on every attempt, like one that keeps crashing it. */
 export const doomed = defineWorkflow({
   name: "doomed",
-  title: "Doomed",
-  description: "Loses its lease every time.",
   steps: [
     {
       name: "hog",
-      title: "Hog",
-      description: "Blocks the event loop past its lease.",
       leaseMs: 200,
       maxAttempts: 2,
       async run() {
@@ -147,8 +127,6 @@ interface DiamondInput {
 function branch(name: "left" | "right") {
   return {
     name,
-    title: name,
-    description: `Runs alongside the other branch.`,
     needs: ["start"],
     async run(ctx: StepContext<DiamondInput>) {
       const { failBranch, branchMs = 50, survivorMs } = ctx.input;
@@ -163,23 +141,17 @@ function branch(name: "left" | "right") {
 /** start, then left and right side by side, then join once both are done. tail only needs right. */
 export const diamond = defineWorkflow<DiamondInput>({
   name: "diamond",
-  title: "Diamond",
-  description: "Two branches that meet again.",
   steps: [
-    { name: "start", title: "start", description: "Runs first.", run: async () => ({ n: 1 }) },
+    { name: "start", run: async () => ({ n: 1 }) },
     branch("left"),
     branch("right"),
     {
       name: "join",
-      title: "join",
-      description: "Needs both branches.",
       needs: ["left", "right"],
       run: async (ctx) => ({ seen: Object.keys(ctx.outputs).sort() }),
     },
     {
       name: "tail",
-      title: "tail",
-      description: "Only needs right, so it runs even if left fails.",
       needs: ["right"],
       run: async (ctx) => ({ seen: Object.keys(ctx.outputs).sort() }),
     },

@@ -1,7 +1,7 @@
 // The smallest useful workflow, and a template for new ones.
 
 import { setTimeout as sleep } from "node:timers/promises";
-import { defineWorkflow } from "@ratchet/engine";
+import { describeWorkflow } from "../describeWorkflow.ts";
 
 export interface GreetingInput {
   name?: string;
@@ -9,7 +9,7 @@ export interface GreetingInput {
   timeScale?: number;
 }
 
-export default defineWorkflow<GreetingInput>({
+export default describeWorkflow<GreetingInput>({
   name: "greeting",
   title: "Send a greeting",
   description: "A three-step example showing how little a new workflow needs.",

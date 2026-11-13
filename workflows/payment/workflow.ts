@@ -1,4 +1,5 @@
-import { defineWorkflow, NonRetryableError, type StepContext } from "@ratchet/engine";
+import { NonRetryableError, type StepContext } from "@ratchet/engine";
+import { describeWorkflow } from "../describeWorkflow.ts";
 import {
   createSimulation,
   PaymentDeclined,
@@ -51,7 +52,7 @@ function simulationFor(ctx: StepContext<PaymentInput>) {
   });
 }
 
-export default defineWorkflow<PaymentInput>({
+export default describeWorkflow<PaymentInput>({
   name: "payment",
   title: "Process a payment",
   description:

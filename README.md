@@ -63,21 +63,15 @@ export interface StockReportInput {
 
 export default defineWorkflow<StockReportInput>({
   name: "stock-report",
-  title: "Stock report",
-  description: "Builds a short report on a stock.",
   steps: [
     {
       name: "fetch-prices",
-      title: "Fetch prices",
-      description: "Loads recent prices.",
       async run() {
         return { prices: [] };
       },
     },
     {
       name: "fetch-news",
-      title: "Fetch news",
-      description: "Loads recent headlines, alongside the prices.",
       needs: [], // needs nothing, so it starts with fetch-prices
       async run() {
         return { headlines: [] };
@@ -85,8 +79,6 @@ export default defineWorkflow<StockReportInput>({
     },
     {
       name: "write-report",
-      title: "Write report",
-      description: "Combines prices and news.",
       needs: ["fetch-prices", "fetch-news"], // waits for both
       async run(ctx) {
         const { prices } = ctx.outputs["fetch-prices"];

@@ -63,19 +63,13 @@ function hashPlan(definition: WorkflowDefinition): string {
   const links = resolveNeeds(definition.steps);
   const plan = {
     name: definition.name,
-    title: definition.title,
-    description: definition.description,
-    steps: definition.steps.map(
-      ({ name, title, description, leaseMs, maxAttempts, backoffMs }, i) => ({
-        name,
-        title,
-        description,
-        needs: links[i].needs,
-        leaseMs,
-        maxAttempts,
-        backoffMs,
-      }),
-    ),
+    steps: definition.steps.map(({ name, leaseMs, maxAttempts, backoffMs }, i) => ({
+      name,
+      needs: links[i].needs,
+      leaseMs,
+      maxAttempts,
+      backoffMs,
+    })),
   };
   return createHash("sha256").update(JSON.stringify(plan)).digest("hex").slice(0, 12);
 }
@@ -90,8 +84,6 @@ async function syncWorkflows(workflows: WorkflowDefinition[]) {
         .values({
           name: definition.name,
           version,
-          title: definition.title,
-          description: definition.description,
         })
         .onConflict((oc) => oc.columns(["name", "version"]).doNothing())
         .returning("id")
@@ -105,8 +97,6 @@ async function syncWorkflows(workflows: WorkflowDefinition[]) {
           definition.steps.map((step, position) => ({
             workflow_id: created.id,
             name: step.name,
-            title: step.title,
-            description: step.description,
             position,
             needs: links[position].needs,
             lease_ms: step.leaseMs ?? null,
