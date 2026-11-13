@@ -119,7 +119,9 @@ export function RunPage() {
       {redrive.error && (
         <ErrorMessage>Could not resume this run: {redrive.error.message}</ErrorMessage>
       )}
-      <p className="mt-0.5 mb-4 text-muted">{run.workflow_description}</p>
+      {run.workflow_description && (
+        <p className="mt-0.5 mb-4 text-muted">{run.workflow_description}</p>
+      )}
 
       <FlowDiagram
         steps={steps}
