@@ -9,49 +9,12 @@ import {
   defineWorkflow,
   type WorkflowEngine,
   type WorkflowEngineSettings,
-  type WorkflowStore,
 } from "../src/index.ts";
-
-/** Builds a store holding two steps of the "slow" workflow, recording what happens. */
-function fakeStore() {
-  const calls = { claims: 0, completed: 0, closed: 0 };
-  const store: WorkflowStore = {
-    syncWorkflows: async () => {},
-    startRun: async () => "run",
-    async claimStep({ workerId }) {
-      if (calls.claims === 2) return null;
-      calls.claims++;
-      return {
-        stepRunId: `step-run-${calls.claims}`,
-        stepName: "slow",
-        position: 0,
-        attempt: 1,
-        leaseMs: 30_000,
-        workerId,
-        runId: "run",
-        workflow: "slow",
-        input: {},
-        outputs: {},
-      };
-    },
-    completeStep: async () => {
-      calls.completed++;
-      return { completed: true, next: null };
-    },
-    failStep: async () => ({ recorded: true, retryInMs: null, failureReason: "non_retryable" }),
-    extendLease: async () => true,
-    redriveRun: async () => false,
-    sweepExpiredLeases: async () => 0,
-    close: async () => {
-      calls.closed++;
-    },
-  };
-  return { store, calls };
-}
+import { fakeStore } from "./fakeStore.ts";
 
 /** Starts an engine whose step runs until the returned release function is called. */
 async function engineWithRunningStep(settings?: Partial<WorkflowEngineSettings>) {
-  const { store, calls } = fakeStore();
+  const { store, calls } = fakeStore({ workflow: "slow", claims: 2 });
   let started = () => {};
   let release = () => {};
   const stepStarted = new Promise<void>((resolve) => (started = resolve));
