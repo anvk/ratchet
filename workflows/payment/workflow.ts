@@ -26,6 +26,12 @@ export interface PaymentInput {
   vendorTimeouts?: number;
   /** Makes the first ledger write succeed but report a timeout, so it gets retried. */
   ledgerTimeout?: boolean;
+  /**
+   * The sender's account. Payments from the same account run one at a time, so
+   * two of them can't both pass the balance check before either is posted.
+   * Without it, a payment is in no group.
+   */
+  account?: string;
 }
 
 /**
@@ -57,6 +63,7 @@ export default describeWorkflow<PaymentInput>({
   title: "Process a payment",
   description:
     "Takes a fake payment through account checks, runs the risk and sanctions checks side by side, then posts it to the ledger.",
+  concurrency: { key: (input) => (input.account ? `account:${input.account}` : null), limit: 1 },
   steps: [
     {
       name: "receive-payment",
@@ -66,6 +73,7 @@ export default describeWorkflow<PaymentInput>({
         receivePayment({
           paymentId: ctx.runId,
           amountCents: ctx.input.amountCents,
+          from: ctx.input.account,
           simulation: simulationFor(ctx),
         }),
     },

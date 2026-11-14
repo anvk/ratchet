@@ -67,12 +67,26 @@ CREATE TABLE workflow_runs (
   finished_at timestamptz,
   -- The failure_reason of the step that failed the run.
   failure_reason failure_reason,
-  CHECK ((status = 'failed') = (failure_reason IS NOT NULL))
+  -- Runs with the same key form a group, of which only so many are in progress
+  -- at once. Null for a run in no group.
+  concurrency_key text,
+  -- How many runs of the group may be in progress at once, copied from the
+  -- workflow when the run starts. Null exactly when the key is null.
+  concurrency_limit int,
+  -- When the run was given a slot. Null while it waits for one; a run in no
+  -- group is admitted when it starts.
+  admitted_at timestamptz,
+  CHECK ((status = 'failed') = (failure_reason IS NOT NULL)),
+  CHECK ((concurrency_key IS NULL) = (concurrency_limit IS NULL)),
+  CHECK (concurrency_limit > 0)
 );
 
 -- Keyset pagination for the runs list, with and without a status filter.
 CREATE INDEX workflow_runs_list_idx ON workflow_runs (created_at DESC, id DESC);
 CREATE INDEX workflow_runs_status_list_idx ON workflow_runs (status, created_at DESC, id DESC);
+-- Finds a group's runs that are waiting or in progress, oldest first.
+CREATE INDEX workflow_runs_group_idx ON workflow_runs (concurrency_key, created_at, id)
+  WHERE concurrency_key IS NOT NULL AND finished_at IS NULL;
 
 CREATE TABLE step_runs (
   id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),

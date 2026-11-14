@@ -46,3 +46,16 @@ test("the definition has no title or description, on the workflow or any step", 
     assert.equal("description" in step, false);
   }
 });
+
+test("a concurrency setting reaches the definition", () => {
+  const { definition } = describeWorkflow<{ group?: string }>({
+    name: "grouped",
+    title: "Run grouped",
+    description: "Has a concurrency group.",
+    concurrency: { key: (input) => input.group ?? null, limit: 2 },
+    steps: [{ name: "only-step", title: "Only step", description: "Runs.", run: first }],
+  });
+  assert.equal(definition.concurrency?.limit, 2);
+  assert.equal(definition.concurrency?.key({ group: "a" }), "a");
+  assert.equal(definition.concurrency?.key({}), null);
+});

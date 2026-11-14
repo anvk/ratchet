@@ -18,6 +18,12 @@ export function defineWorkflow<Input = unknown>(
   if (definition.steps.length === 0) {
     throw new Error(`Workflow ${definition.name} has no steps`);
   }
+  if (
+    definition.concurrency !== undefined &&
+    !(Number.isInteger(definition.concurrency.limit) && definition.concurrency.limit > 0)
+  ) {
+    throw new Error(`Workflow ${definition.name} needs a whole, positive concurrency limit`);
+  }
   assertUnique(
     definition.steps.map((s) => s.name),
     `step in ${definition.name}`,
@@ -105,7 +111,16 @@ export function createWorkflowEngine({
     startRun({ workflow, input, idempotencyKey }) {
       const definition = registry.get(workflow);
       if (!definition) return Promise.reject(new UnknownWorkflowError(workflow));
-      return store.startRun({ definition, input, idempotencyKey });
+      try {
+        const key = definition.concurrency?.key(input);
+        const concurrency =
+          definition.concurrency && key != null
+            ? { key, limit: definition.concurrency.limit }
+            : undefined;
+        return store.startRun({ definition, input, idempotencyKey, concurrency });
+      } catch (err) {
+        return Promise.reject(err);
+      }
     },
     redriveRun: (runId) => store.redriveRun({ runId }),
     runWorker: ({ workerId } = {}) =>

@@ -51,6 +51,13 @@ What the engine promises. Each guarantee is backed by a test in
 - **Every failed step and run records why.** `failure_reason` is set exactly
   when the status is `failed` (a database check enforces it): `non_retryable`,
   `attempts_exhausted`, `lost_worker` or `unknown_step`.
+- **A concurrency group never runs more than its limit at once.** At most
+  `limit` runs with the same concurrency key are in progress; a run is in
+  progress from when it is admitted until it finishes, succeeded or failed. The
+  others wait with no step ready, and are admitted oldest first as slots free
+  up. A run that fails or is redriven goes through the same admission. Counting
+  the slots and admitting a run happen under one lock per key, so two runs can't
+  take the same slot.
 - **A repeated key starts one run.** Starting a run with an idempotency key the
   caller already used returns the existing run.
 - **Each step has a stable key.** `ctx.idempotencyKey` is the same on every
@@ -80,3 +87,6 @@ What the engine promises. Each guarantee is backed by a test in
   one, steps whose lease expired stay `running`.
 - **A step that blocks the event loop for longer than its lease loses it,**
   because heartbeats can't run. Give heavy synchronous steps a longer `leaseMs`.
+- **A run that never finishes keeps its concurrency slot.** If no worker can
+  claim its steps (for example, no worker has its version), it stays in
+  progress, and the runs waiting behind it in its group wait too.

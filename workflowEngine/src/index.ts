@@ -15,6 +15,7 @@ export type {
   StepDefaults,
   StepContext,
   StepDefinition,
+  WorkflowConcurrency,
   WorkflowDefinition,
   WorkflowEngine,
   WorkflowEngineSettings,

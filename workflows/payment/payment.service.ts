@@ -113,14 +113,19 @@ function simulateRisk({
   return Math.round((breaches / paths) * 100);
 }
 
-/** Accepts a payment request and fixes its amount and accounts. */
+/**
+ * Accepts a payment request and fixes its amount and accounts. The sender is
+ * `from`, or a default account if not given.
+ */
 export async function receivePayment({
   paymentId,
   amountCents,
+  from,
   simulation,
 }: {
   paymentId: string;
   amountCents?: number;
+  from?: string;
   simulation: Simulation;
 }) {
   await pause({ simulation, minMs: 500, maxMs: 1000 });
@@ -128,7 +133,7 @@ export async function receivePayment({
     paymentId,
     amountCents:
       amountCents ?? Math.round(simulation.random({ label: "amount", min: 1_000, max: 250_000 })),
-    from: "acct_sender",
+    from: from ?? "acct_sender",
     to: "acct_merchant",
   };
 }

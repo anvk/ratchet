@@ -11,8 +11,8 @@ pnpm dev
 ```
 
 Open <http://localhost:5173>, pick a workflow and press **Start run**. `pnpm dev` starts the demo: Postgres, the API, the orchestrator, three workers and the dashboard.
-How it all works is explained in [`docs/how-the-engine-works-v4.md`](docs/how-the-engine-works-v4.md)
-(earlier designs: [v1](docs/how-the-engine-works-v1.md), [v2](docs/how-the-engine-works-v2.md), [v3](docs/how-the-engine-works-v3.md)).
+How it all works is explained in [`docs/how-the-engine-works-v5.md`](docs/how-the-engine-works-v5.md)
+(earlier designs: [v1](docs/how-the-engine-works-v1.md), [v2](docs/how-the-engine-works-v2.md), [v3](docs/how-the-engine-works-v3.md), [v4](docs/how-the-engine-works-v4.md)).
 
 ```sh
 pnpm test        # engine tests against real Postgres and worker processes
@@ -33,10 +33,10 @@ to show it running; none of the demo is needed to use the engine.
 
 **The engine**
 
-| Path              | What's there                                                                                                                                                                |
-| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `workflowEngine/` | Workers, the orchestrator, leases, retries, the registry and the `WorkflowStore` interface, with Postgres in `src/stores/postgres/`. What it promises is in `guarantees.md` |
-| `docs/`           | Walkthroughs of how the engine works, for newcomers. `how-the-engine-works-v4.md` describes the current engine                                                              |
+| Path              | What's there                                                                                                                                                                                    |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `workflowEngine/` | Workers, the orchestrator, leases, retries, concurrency groups, the registry and the `WorkflowStore` interface, with Postgres in `src/stores/postgres/`. What it promises is in `guarantees.md` |
+| `docs/`           | Walkthroughs of how the engine works, for newcomers. `how-the-engine-works-v5.md` describes the current engine                                                                                  |
 
 **Demo only**
 
@@ -86,6 +86,22 @@ export default defineWorkflow<StockReportInput>({
         return { ticker: ctx.input.ticker, prices, headlines };
       },
     },
+  ],
+});
+```
+
+### Keep some runs from overlapping
+
+`concurrency` makes runs that share a key take turns. The key comes from the
+run's input; at most `limit` runs with the same key are in progress at once,
+and the rest wait, oldest first. A `null` key puts a run in no group:
+
+```ts
+export default defineWorkflow<StockReportInput>({
+  name: "stock-report",
+  concurrency: { key: (input) => `ticker:${input.ticker}`, limit: 1 }, // one report per ticker at a time
+  steps: [
+    // ...as above
   ],
 });
 ```

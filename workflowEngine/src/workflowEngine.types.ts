@@ -57,10 +57,26 @@ export interface StepDefinition<Input = any> {
   run(ctx: StepContext<Input>): Promise<unknown>;
 }
 
+/**
+ * Limits how many of a workflow's runs are in progress at once. Each run's key
+ * puts it in a group, and only `limit` runs of a group are in progress together.
+ */
+export interface WorkflowConcurrency<Input = any> {
+  /**
+   * Computed from a run's input when it starts. Runs with the same key form a
+   * group. Null puts the run in no group, so it never waits.
+   */
+  key: (input: Input) => string | null;
+  /** How many runs of a group may be in progress at once. The rest wait for one to finish, oldest first. */
+  limit: number;
+}
+
 /** A workflow as its author writes it, passed to defineWorkflow. */
 export interface WorkflowDefinition<Input = any> {
   /** Stable identifier, unique within the registry. */
   name: string;
+  /** Keeps runs that share a key from overlapping. Runs are not limited by default. */
+  concurrency?: WorkflowConcurrency<Input>;
   /** Each step is listed after the steps it needs. */
   steps: StepDefinition<Input>[];
 }
@@ -130,11 +146,15 @@ export interface WorkflowStore {
    * claim, and returns the run's id.
    * If the caller's idempotencyKey was already used, creates nothing and returns
    * the existing run's id.
+   * With `concurrency`, the run is admitted only if fewer than `limit` runs with
+   * that key are in progress; otherwise it is created waiting, with no step
+   * ready, until one finishes.
    */
   startRun(request: {
     definition: WorkflowDefinition;
     input?: unknown;
     idempotencyKey?: string;
+    concurrency?: { key: string; limit: number };
   }): Promise<string>;
   /**
    * Claims a ready step belonging to one of these workflows, choosing by order,
@@ -151,7 +171,8 @@ export interface WorkflowStore {
   /**
    * Records success, then readies every step whose needs have now all
    * succeeded, or finishes the run once nothing can move: succeeded if every
-   * step did, failed if any failed for good. Two steps finishing at
+   * step did, failed if any failed for good; finishing a run in a group gives
+   * its slot to the oldest waiting run. Two steps finishing at
    * once must ready a step that needs both exactly once. With claimNext, the
    * first newly ready step goes straight to the same worker in the same
    * transaction, so no other worker can take it in between. `completed` is
@@ -176,7 +197,8 @@ export interface WorkflowStore {
    * step becomes ready again after a backoff (`retryInMs`). Otherwise it fails
    * for good, with `failureReason` saying why: steps that depend on it are
    * skipped, every other step carries on, and the run fails once nothing is
-   * left to move. `recorded` is false if the claim is stale.
+   * left to move; a run that fails gives its slot in a group to the oldest
+   * waiting run. `recorded` is false if the claim is stale.
    */
   failStep(request: {
     claim: Claim;
@@ -191,7 +213,8 @@ export interface WorkflowStore {
   /**
    * Resumes a run that failed for a reason in REDRIVABLE_FAILURE_REASONS, from
    * the steps that didn't succeed, with fresh attempts. Succeeded steps keep
-   * their outputs. Returns false, changing nothing, for any other run.
+   * their outputs. A run in a group that is full waits for a slot before its
+   * steps become ready. Returns false, changing nothing, for any other run.
    */
   redriveRun(request: { runId: string }): Promise<boolean>;
   /** Releases connections or file handles. */
@@ -247,14 +270,19 @@ export interface WorkflowEngine {
   /**
    * Starts a run of one of this engine's workflows, by name, and returns its
    * id. Throws UnknownWorkflowError, creating nothing, for any other name. See
-   * WorkflowStore.startRun for idempotencyKey.
+   * WorkflowStore.startRun for idempotencyKey. A run of a workflow with
+   * `concurrency` may wait for a slot before any of its steps run.
    */
   startRun(request: {
     workflow: string;
     input?: unknown;
     idempotencyKey?: string;
   }): Promise<string>;
-  /** Resumes a failed run from the steps that didn't succeed. See WorkflowStore.redriveRun. */
+  /**
+   * Resumes a failed run from the steps that didn't succeed. A run in a group
+   * that is full waits for a slot before its steps become ready. See
+   * WorkflowStore.redriveRun.
+   */
   redriveRun(runId: string): Promise<boolean>;
   /** Runs a worker until the engine is closed. */
   runWorker(options?: { workerId?: string }): Promise<void>;
