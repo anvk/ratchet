@@ -123,7 +123,7 @@ export interface RunDetail {
  */
 
 /**
- * One entry in a run's history. `type` is one of `run_queued`, `run_started`,
+ * One entry in a run's history. `type` is one of `run_queued`, `run_waiting`, `run_admitted`, `run_started`,
  * `run_succeeded`, `run_failed`, `step_ready`, `step_claimed`, `step_succeeded`,
  * `step_failed`, `step_skipped`, `step_lease_expired`, `run_redriven` or
  * `step_retry_scheduled`.

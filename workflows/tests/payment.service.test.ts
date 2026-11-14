@@ -9,6 +9,7 @@ import {
   createSimulation,
   PaymentDeclined,
   postLedger,
+  receivePayment,
   screenSanctions,
   validateAccount,
 } from "../payment/payment.service.ts";
@@ -82,4 +83,12 @@ test("a vendor timeout is a plain error, so the workflow retries it", async () =
   assert.ok(error instanceof Error);
   assert.ok(!(error instanceof PaymentDeclined));
   assert.equal(error.message, "Sanctions vendor timed out");
+});
+
+test("a received payment comes from the given account, or a default one", async () => {
+  const paymentId = randomUUID();
+  const given = await receivePayment({ paymentId, from: "acct_shared", simulation: instant() });
+  assert.equal(given.from, "acct_shared");
+  const unspecified = await receivePayment({ paymentId, simulation: instant() });
+  assert.equal(unspecified.from, "acct_sender");
 });

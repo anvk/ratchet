@@ -5,6 +5,10 @@ import type { PaymentInput } from "./workflow.ts";
 export const presets: Preset<PaymentInput>[] = [
   { label: "Random payment", input: {} },
   { label: "Payment clears", input: { forceOutcome: "clear" } },
+  {
+    label: "Payments from one account (one at a time)",
+    input: { forceOutcome: "clear", account: "acct_shared" },
+  },
   { label: "Insufficient funds", input: { forceOutcome: "insufficient-funds" } },
   { label: "Declined by risk score", input: { forceOutcome: "risk-declined" } },
   { label: "Sanctions match", input: { forceOutcome: "sanctions-match" } },
