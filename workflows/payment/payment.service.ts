@@ -195,16 +195,22 @@ export async function scoreRisk({
 /**
  * Checks both parties against a fake sanctions list, and throws on a match.
  * The fake vendor is flaky: without a forced outcome, 15% of calls time out,
- * which is worth retrying. `timesOut` forces a timeout.
+ * which is worth retrying. `timesOut` makes the vendor answer with a timeout
+ * error straight away. `hangs` makes it never answer, until the caller's
+ * signal fires.
  */
 export async function screenSanctions({
   simulation,
   timesOut = false,
+  hangs = false,
 }: {
   simulation: Simulation;
   timesOut?: boolean;
+  hangs?: boolean;
 }) {
   await pause({ simulation, minMs: 1000, maxMs: 4000 });
+  // 2 ** 31 - 1 ms is the longest delay a timer accepts. Aborting rejects it.
+  if (hangs) await sleep(2 ** 31 - 1, undefined, { signal: simulation.signal });
   const forced = simulation.forceOutcome;
   const flaky = !forced && simulation.random({ label: "vendor", min: 0, max: 1 }) < 0.15;
   if (timesOut || flaky) throw new Error("Sanctions vendor timed out");

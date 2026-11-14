@@ -24,6 +24,11 @@ export interface PaymentInput {
   overloadRisk?: boolean;
   /** How many attempts of the sanctions check time out before one gets through. */
   vendorTimeouts?: number;
+  /**
+   * How many attempts of the sanctions check never get an answer, so each is cut
+   * off by the step's timeout.
+   */
+  vendorHangs?: number;
   /** Makes the first ledger write succeed but report a timeout, so it gets retried. */
   ledgerTimeout?: boolean;
   /**
@@ -117,11 +122,15 @@ export default describeWorkflow<PaymentInput>({
       // A flaky vendor gets more tries, starting half a second apart.
       maxAttempts: 4,
       backoffMs: 500,
+      // A normal check answers within 4 seconds, so 6 seconds only cuts off a
+      // vendor that has stopped answering.
+      timeoutMs: 6_000,
       run: (ctx) =>
         finalIfDeclined(
           screenSanctions({
             simulation: simulationFor(ctx),
             timesOut: ctx.attempt <= (ctx.input.vendorTimeouts ?? 0),
+            hangs: ctx.attempt <= (ctx.input.vendorHangs ?? 0),
           }),
         ),
     },

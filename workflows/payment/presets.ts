@@ -17,6 +17,8 @@ export const presets: Preset<PaymentInput>[] = [
     input: { forceOutcome: "clear", overloadRisk: true },
   },
   { label: "Flaky sanctions vendor", input: { forceOutcome: "clear", vendorTimeouts: 2 } },
+  // The first attempt never gets an answer and is cut off after 6 seconds; the retry goes through.
+  { label: "Sanctions vendor hangs", input: { forceOutcome: "clear", vendorHangs: 1 } },
   // Times out on all 4 attempts screen-sanctions gets, so the run gives up.
   { label: "Sanctions vendor down", input: { forceOutcome: "clear", vendorTimeouts: 4 } },
   { label: "Ledger write times out", input: { forceOutcome: "clear", ledgerTimeout: true } },
