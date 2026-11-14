@@ -1,13 +1,14 @@
-import { startWorkers, stopWorkers, store } from "./harness.ts";
+import { startWorkers, stopWorkers, store, waitForFinish } from "./harness.ts";
 
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { createWorkflowEngine, defineWorkflow } from "../src/index.ts";
 import { db } from "../src/stores/postgres/index.ts";
-import { pipeline } from "./fixtures/workflows.ts";
+import { exclusive, paired, pipeline } from "./fixtures/workflows.ts";
 
-// No workers: these tests only look at what a run records when it starts.
-before(() => startWorkers(0));
+// Real workers, which run the fixture workflows. The inline workflows below
+// are unknown to them, so nothing claims those runs.
+before(() => startWorkers(4));
 after(() => stopWorkers());
 
 interface GroupedInput {
@@ -87,4 +88,189 @@ test("changing a workflow's concurrency limit does not create a new version", as
     .where("name", "=", "concurrency-versioned")
     .execute();
   assert.equal(versions.length, 1);
+});
+
+interface GroupRunInput {
+  group: string;
+  ms?: number;
+  decline?: boolean;
+  failFirst?: boolean;
+}
+
+/** Starts a run of a fixture workflow through an engine, so its concurrency key is computed. */
+async function startFixture(workflow: "exclusive" | "paired", input: GroupRunInput) {
+  const engine = createWorkflowEngine({ workflows: [exclusive, paired], store });
+  return engine.startRun({ workflow, input });
+}
+
+/** A run's row, as the tests check it. */
+const runRow = (runId: string) =>
+  db
+    .selectFrom("workflow_runs")
+    .select(["status", "failure_reason", "admitted_at", "finished_at"])
+    .where("id", "=", runId)
+    .executeTakeFirstOrThrow();
+
+/** The types of a run's events, in order. */
+async function eventTypes(runId: string) {
+  const events = await db
+    .selectFrom("events")
+    .select("type")
+    .where("run_id", "=", runId)
+    .orderBy("id")
+    .execute();
+  return events.map((e) => e.type);
+}
+
+/**
+ * The most runs that were ever in progress at once, from when each was admitted
+ * until it finished. Instants are sorted; when an end and a start are the same
+ * instant, the end counts first.
+ */
+function mostInProgress(runs: { admitted_at: Date | null; finished_at: Date | null }[]) {
+  const instants = runs.flatMap((r) => [
+    { at: r.admitted_at!.getTime(), change: 1 },
+    { at: r.finished_at!.getTime(), change: -1 },
+  ]);
+  instants.sort((a, b) => a.at - b.at || a.change - b.change);
+  let current = 0;
+  let most = 0;
+  for (const { change } of instants) {
+    current += change;
+    most = Math.max(most, current);
+  }
+  return most;
+}
+
+/** The admitted_at and finished_at of runs. */
+const timesOf = (runIds: string[]) =>
+  db
+    .selectFrom("workflow_runs")
+    .select(["id", "status", "admitted_at", "finished_at"])
+    .where("id", "in", runIds)
+    .orderBy("admitted_at")
+    .execute();
+
+test("runs of one group never overlap when the limit is 1", async () => {
+  const runIds = await Promise.all(
+    Array.from({ length: 20 }, () => startFixture("exclusive", { group: "overlap-1" })),
+  );
+  await waitForFinish(runIds);
+  const runs = await timesOf(runIds);
+  assert.ok(runs.every((r) => r.status === "succeeded"));
+  assert.equal(mostInProgress(runs), 1);
+});
+
+test("a limit of 2 lets two runs of a group overlap, and never three", async () => {
+  const runIds = await Promise.all(
+    Array.from({ length: 20 }, () => startFixture("paired", { group: "overlap-2", ms: 100 })),
+  );
+  await waitForFinish(runIds);
+  const runs = await timesOf(runIds);
+  assert.ok(runs.every((r) => r.status === "succeeded"));
+  assert.equal(mostInProgress(runs), 2);
+});
+
+test("runs of different groups don't wait for each other", async () => {
+  const runIds = await Promise.all([
+    startFixture("exclusive", { group: "apart-a", ms: 500 }),
+    startFixture("exclusive", { group: "apart-b", ms: 500 }),
+  ]);
+  for (const runId of runIds) {
+    assert.notEqual((await runRow(runId)).admitted_at, null);
+    assert.ok(!(await eventTypes(runId)).includes("run_waiting"));
+  }
+  await waitForFinish(runIds);
+});
+
+test("a run that has to wait has no ready step until it is admitted", async () => {
+  const first = await startFixture("exclusive", { group: "waiting", ms: 1000 });
+  const second = await startFixture("exclusive", { group: "waiting", ms: 50 });
+
+  const waiting = await runRow(second);
+  assert.equal(waiting.admitted_at, null);
+  assert.equal(waiting.status, "queued");
+  const steps = await db
+    .selectFrom("step_runs")
+    .select("status")
+    .where("run_id", "=", second)
+    .execute();
+  assert.ok(steps.length > 0 && steps.every((s) => s.status === "pending"));
+  assert.deepEqual(
+    (await eventTypes(second)).filter((t) => t === "run_waiting"),
+    ["run_waiting"],
+  );
+
+  await waitForFinish([first, second]);
+  const done = await runRow(second);
+  assert.notEqual(done.admitted_at, null);
+  assert.equal(done.status, "succeeded");
+  assert.deepEqual(
+    (await eventTypes(second)).filter((t) => t === "run_admitted"),
+    ["run_admitted"],
+  );
+});
+
+test("waiting runs are admitted oldest first", async () => {
+  const runIds: string[] = [];
+  for (let i = 0; i < 5; i++) {
+    runIds.push(await startFixture("exclusive", { group: "order", ms: 100 }));
+  }
+  await waitForFinish(runIds);
+  const byAdmission = await timesOf(runIds);
+  assert.deepEqual(
+    byAdmission.map((r) => r.id),
+    runIds,
+  );
+});
+
+test("a run that fails frees its slot", async () => {
+  const first = await startFixture("exclusive", { group: "failing", decline: true });
+  const second = await startFixture("exclusive", { group: "failing" });
+  await waitForFinish([first, second]);
+  assert.equal((await runRow(first)).status, "failed");
+  assert.equal((await runRow(second)).status, "succeeded");
+});
+
+test("a redriven run waits for a slot if its group is full", async () => {
+  const a = await startFixture("exclusive", { group: "redrive-full", failFirst: true });
+  await waitForFinish([a]);
+  const failed = await runRow(a);
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.failure_reason, "attempts_exhausted");
+
+  const b = await startFixture("exclusive", { group: "redrive-full", ms: 1500 });
+  assert.equal(await store.redriveRun({ runId: a }), true);
+
+  const waiting = await runRow(a);
+  assert.equal(waiting.status, "queued");
+  assert.equal(waiting.admitted_at, null);
+  const ready = await db
+    .selectFrom("step_runs")
+    .select("id")
+    .where("run_id", "=", a)
+    .where("status", "=", "ready")
+    .execute();
+  assert.equal(ready.length, 0);
+  const types = await eventTypes(a);
+  assert.ok(types.lastIndexOf("run_waiting") > types.lastIndexOf("run_redriven"));
+  assert.ok(types.lastIndexOf("run_redriven") >= 0);
+
+  await waitForFinish([a, b]);
+  const [aDone, bDone] = [await runRow(a), await runRow(b)];
+  assert.equal(aDone.status, "succeeded");
+  assert.equal(bDone.status, "succeeded");
+  assert.ok(aDone.admitted_at!.getTime() >= bDone.finished_at!.getTime());
+});
+
+test("a redriven run takes a free slot straight away", async () => {
+  const a = await startFixture("exclusive", { group: "redrive-free", failFirst: true });
+  await waitForFinish([a]);
+  assert.equal((await runRow(a)).status, "failed");
+
+  assert.equal(await store.redriveRun({ runId: a }), true);
+  assert.notEqual((await runRow(a)).admitted_at, null);
+
+  await waitForFinish([a]);
+  assert.equal((await runRow(a)).status, "succeeded");
 });

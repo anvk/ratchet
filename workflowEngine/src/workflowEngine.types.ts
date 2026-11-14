@@ -171,7 +171,8 @@ export interface WorkflowStore {
   /**
    * Records success, then readies every step whose needs have now all
    * succeeded, or finishes the run once nothing can move: succeeded if every
-   * step did, failed if any failed for good. Two steps finishing at
+   * step did, failed if any failed for good; finishing a run in a group gives
+   * its slot to the oldest waiting run. Two steps finishing at
    * once must ready a step that needs both exactly once. With claimNext, the
    * first newly ready step goes straight to the same worker in the same
    * transaction, so no other worker can take it in between. `completed` is
@@ -196,7 +197,8 @@ export interface WorkflowStore {
    * step becomes ready again after a backoff (`retryInMs`). Otherwise it fails
    * for good, with `failureReason` saying why: steps that depend on it are
    * skipped, every other step carries on, and the run fails once nothing is
-   * left to move. `recorded` is false if the claim is stale.
+   * left to move; a run that fails gives its slot in a group to the oldest
+   * waiting run. `recorded` is false if the claim is stale.
    */
   failStep(request: {
     claim: Claim;
@@ -211,7 +213,8 @@ export interface WorkflowStore {
   /**
    * Resumes a run that failed for a reason in REDRIVABLE_FAILURE_REASONS, from
    * the steps that didn't succeed, with fresh attempts. Succeeded steps keep
-   * their outputs. Returns false, changing nothing, for any other run.
+   * their outputs. A run in a group that is full waits for a slot before its
+   * steps become ready. Returns false, changing nothing, for any other run.
    */
   redriveRun(request: { runId: string }): Promise<boolean>;
   /** Releases connections or file handles. */
@@ -275,7 +278,11 @@ export interface WorkflowEngine {
     input?: unknown;
     idempotencyKey?: string;
   }): Promise<string>;
-  /** Resumes a failed run from the steps that didn't succeed. See WorkflowStore.redriveRun. */
+  /**
+   * Resumes a failed run from the steps that didn't succeed. A run in a group
+   * that is full waits for a slot before its steps become ready. See
+   * WorkflowStore.redriveRun.
+   */
   redriveRun(runId: string): Promise<boolean>;
   /** Runs a worker until the engine is closed. */
   runWorker(options?: { workerId?: string }): Promise<void>;

@@ -110,8 +110,76 @@ async function syncWorkflows(workflows: WorkflowDefinition[]) {
 }
 
 /**
+ * Takes the lock of one concurrency group until the transaction ends. Counting
+ * a group's slots and giving them away happens under it, so two transactions
+ * can never both see the same free slot. It needs no row to exist. Lock order:
+ * run, then group, then steps. Call it before admitWaitingRuns.
+ */
+async function lockGroup({ trx, key }: { trx: Tx; key: string }) {
+  await sql`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`.execute(trx);
+}
+
+/** How many runs of a group hold a slot: admitted and not finished. Call it with the group locked. */
+async function slotsInUse({ trx, key }: { trx: Tx; key: string }): Promise<number> {
+  const { count } = await trx
+    .selectFrom("workflow_runs")
+    .select((eb) => eb.fn.countAll<string>().as("count"))
+    .where("concurrency_key", "=", key)
+    .where("admitted_at", "is not", null)
+    .where("finished_at", "is", null)
+    .executeTakeFirstOrThrow();
+  return Number(count);
+}
+
+/**
+ * Gives free slots in a group to its waiting runs, oldest first, for as long as
+ * there are both. Admitting a run readies its steps that need nothing (or whose
+ * needs have succeeded, for a redriven run). The only run rows it locks are
+ * waiting ones, which no transaction holds while also wanting the group lock.
+ * Call it with the group locked.
+ */
+async function admitWaitingRuns({ trx, key }: { trx: Tx; key: string }) {
+  for (;;) {
+    const next = await trx
+      .selectFrom("workflow_runs")
+      .select(["id", "concurrency_limit"])
+      .where("concurrency_key", "=", key)
+      .where("admitted_at", "is", null)
+      .where("finished_at", "is", null)
+      .orderBy("created_at")
+      .orderBy("id")
+      .limit(1)
+      .executeTakeFirst();
+    if (!next) return;
+    if ((await slotsInUse({ trx, key })) >= next.concurrency_limit!) return;
+
+    await lockRun({ trx, runId: next.id });
+    await trx
+      .updateTable("workflow_runs")
+      // Not now(), for the same reason as in startRun.
+      .set({ admitted_at: sql<Date>`clock_timestamp()` })
+      .where("id", "=", next.id)
+      .execute();
+    await emit({ trx, runId: next.id, type: "run_admitted" });
+    await readyUnblockedSteps({ trx, runId: next.id });
+  }
+}
+
+/** Records that a run in a group is waiting, if admitWaitingRuns left it without a slot. */
+async function emitWaitingIfNotAdmitted({ trx, runId }: { trx: Tx; runId: string }) {
+  const run = await trx
+    .selectFrom("workflow_runs")
+    .select("admitted_at")
+    .where("id", "=", runId)
+    .executeTakeFirstOrThrow();
+  if (run.admitted_at === null) await emit({ trx, runId, type: "run_waiting" });
+}
+
+/**
  * Creates a run and its step runs, with every step that needs nothing ready to
  * claim, and returns the run's id. The workflow must already be saved by syncWorkflows.
+ * A run in a group with no free slot is created waiting, with every step pending,
+ * until admitWaitingRuns gives it a slot.
  */
 async function startRun({
   definition,
@@ -139,6 +207,10 @@ async function startRun({
       .orderBy("position")
       .execute();
 
+    // The group lock comes before the insert, so the new run is counted and
+    // admitted under the same lock as everything else in its group.
+    if (concurrency) await lockGroup({ trx, key: concurrency.key });
+
     const run = await trx
       .insertInto("workflow_runs")
       .values({
@@ -148,8 +220,9 @@ async function startRun({
         concurrency_key: concurrency?.key ?? null,
         concurrency_limit: concurrency?.limit ?? null,
         // Not now(), which is the transaction's start time and can be earlier
-        // than the moment the run was actually admitted.
-        admitted_at: sql<Date>`clock_timestamp()`,
+        // than the moment the run was actually admitted. A run in a group is
+        // admitted below, once it has been counted.
+        admitted_at: concurrency ? null : sql<Date>`clock_timestamp()`,
       })
       // Handles two identical requests racing: the loser waits, then does nothing.
       .onConflict((oc) => oc.column("idempotency_key").doNothing())
@@ -168,6 +241,8 @@ async function startRun({
 
     await emit({ trx, runId: run.id, type: "run_queued" });
 
+    // In a group, every step starts pending: admission readies the first ones.
+    const ready = (step: { needs: string[] }) => !concurrency && step.needs.length === 0;
     await trx
       .insertInto("step_runs")
       .values(
@@ -177,13 +252,18 @@ async function startRun({
           name: step.name,
           position: step.position,
           needs: step.needs,
-          status: step.needs.length === 0 ? ("ready" as const) : ("pending" as const),
-          ready_at: step.needs.length === 0 ? sql<Date>`now()` : null,
+          status: ready(step) ? ("ready" as const) : ("pending" as const),
+          ready_at: ready(step) ? sql<Date>`now()` : null,
         })),
       )
       .execute();
-    for (const step of steps.filter((s) => s.needs.length === 0)) {
+    for (const step of steps.filter(ready)) {
       await emit({ trx, runId: run.id, type: "step_ready", stepName: step.name });
+    }
+
+    if (concurrency) {
+      await admitWaitingRuns({ trx, key: concurrency.key });
+      await emitWaitingIfNotAdmitted({ trx, runId: run.id });
     }
 
     return run.id;
@@ -366,9 +446,9 @@ async function finishOwnedStep({
 /**
  * Locks a run's row until the transaction ends. Every change to a started run's
  * steps takes this lock first, so two steps of one run finishing at the same
- * moment take turns, and the second one sees the first as finished. Taking the
- * run's lock before any of its steps' locks, everywhere, also means two
- * transactions can never end up waiting on each other.
+ * moment take turns, and the second one sees the first as finished. The order
+ * everywhere is the run's lock, then its group's lock (lockGroup), then its
+ * steps' locks, so two transactions can never end up waiting on each other.
  */
 async function lockRun({ trx, runId }: { trx: Tx; runId: string }) {
   await trx
@@ -504,7 +584,8 @@ async function retryPolicy({
 /**
  * Finishes a run once nothing in it can move: no step is pending, ready or
  * running. It succeeded if every step did; otherwise it failed, with the
- * reason of the step that failed first. Call it with the run locked.
+ * reason of the step that failed first. A run in a group gives its slot to the
+ * oldest waiting run. Call it with the run locked.
  */
 async function finishRunIfDone({ trx, runId }: { trx: Tx; runId: string }) {
   const steps = await trx
@@ -517,36 +598,40 @@ async function finishRunIfDone({ trx, runId }: { trx: Tx; runId: string }) {
   const failed = steps
     .filter((s) => s.status === "failed")
     .sort((a, b) => a.finished_at!.getTime() - b.finished_at!.getTime() || a.position - b.position);
-  if (failed.length === 0) {
-    await trx
-      .updateTable("workflow_runs")
-      .set({ status: "succeeded", finished_at: sql<Date>`now()` })
-      .where("id", "=", runId)
-      .execute();
+  const firstFailed = failed[0];
+  const finished = await trx
+    .updateTable("workflow_runs")
+    .set(
+      firstFailed
+        ? {
+            status: "failed",
+            failure_reason: firstFailed.failure_reason,
+            finished_at: sql<Date>`now()`,
+          }
+        : { status: "succeeded", finished_at: sql<Date>`now()` },
+    )
+    .where("id", "=", runId)
+    .returning("concurrency_key")
+    .executeTakeFirstOrThrow();
+  if (firstFailed) {
+    await emit({
+      trx,
+      runId,
+      type: "run_failed",
+      detail: {
+        step: firstFailed.name,
+        error: firstFailed.error,
+        failureReason: firstFailed.failure_reason,
+      },
+    });
+  } else {
     await emit({ trx, runId, type: "run_succeeded" });
-    return;
   }
 
-  const firstFailed = failed[0];
-  await trx
-    .updateTable("workflow_runs")
-    .set({
-      status: "failed",
-      failure_reason: firstFailed.failure_reason,
-      finished_at: sql<Date>`now()`,
-    })
-    .where("id", "=", runId)
-    .execute();
-  await emit({
-    trx,
-    runId,
-    type: "run_failed",
-    detail: {
-      step: firstFailed.name,
-      error: firstFailed.error,
-      failureReason: firstFailed.failure_reason,
-    },
-  });
+  if (finished.concurrency_key !== null) {
+    await lockGroup({ trx, key: finished.concurrency_key });
+    await admitWaitingRuns({ trx, key: finished.concurrency_key });
+  }
 }
 
 /**
@@ -795,14 +880,16 @@ async function sweepExpiredLeases({ defaults }: { defaults: StepDefaults }): Pro
  * Resumes a run that failed for a redrivable reason: every step that didn't
  * succeed goes back to pending with fresh attempts, and those whose needs have
  * succeeded become ready. Succeeded steps keep their outputs and never run
- * again. Returns false, changing nothing, if the run can't be redriven.
+ * again. A run in a group takes a slot again like a new run: if the group is
+ * full, it waits, and its steps become ready only when it is admitted. Returns
+ * false, changing nothing, if the run can't be redriven.
  */
 async function redriveRun({ runId }: { runId: string }): Promise<boolean> {
   return db.transaction().execute(async (trx) => {
     await lockRun({ trx, runId });
     const run = await trx
       .selectFrom("workflow_runs")
-      .select(["status", "failure_reason"])
+      .select(["status", "failure_reason", "concurrency_key"])
       .where("id", "=", runId)
       .executeTakeFirst();
     if (!run || !canRedrive(run.status, run.failure_reason)) return false;
@@ -823,13 +910,28 @@ async function redriveRun({ runId }: { runId: string }): Promise<boolean> {
       .where("run_id", "=", runId)
       .where("status", "!=", "succeeded")
       .execute();
+    if (run.concurrency_key === null) {
+      await trx
+        .updateTable("workflow_runs")
+        .set({ status: "running", failure_reason: null, finished_at: null })
+        .where("id", "=", runId)
+        .execute();
+      await emit({ trx, runId, type: "run_redriven" });
+      await readyUnblockedSteps({ trx, runId });
+      return true;
+    }
+
+    // It gave its slot back when it failed, so it needs one again. Admission
+    // readies its steps, and a worker's first claim makes it running.
     await trx
       .updateTable("workflow_runs")
-      .set({ status: "running", failure_reason: null, finished_at: null })
+      .set({ status: "queued", failure_reason: null, finished_at: null, admitted_at: null })
       .where("id", "=", runId)
       .execute();
     await emit({ trx, runId, type: "run_redriven" });
-    await readyUnblockedSteps({ trx, runId });
+    await lockGroup({ trx, key: run.concurrency_key });
+    await admitWaitingRuns({ trx, key: run.concurrency_key });
+    await emitWaitingIfNotAdmitted({ trx, runId });
     return true;
   });
 }

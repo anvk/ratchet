@@ -158,4 +158,41 @@ export const diamond = defineWorkflow<DiamondInput>({
   ],
 });
 
-export const workflows = [pipeline, slow, flaky, doomed, diamond];
+interface GroupInput {
+  /** The concurrency group; a run without one belongs to no group. */
+  group?: string;
+  /** How long the step takes. */
+  ms?: number;
+  /** Fail for good, in a way that can't be redriven. */
+  decline?: boolean;
+  /** Fail the first attempt only, so the run can be redriven and then succeeds. */
+  failFirst?: boolean;
+}
+
+/** The one step of the grouped workflows: waits, then succeeds or fails as the input says. */
+const groupStep = {
+  name: "work",
+  maxAttempts: 1,
+  async run(ctx: StepContext<GroupInput>) {
+    await sleep(ctx.input.ms ?? 50);
+    if (ctx.input.decline) throw new NonRetryableError("Declined");
+    if (ctx.input.failFirst && ctx.attempt === 1) throw new Error("Failed the first attempt");
+    return { done: true };
+  },
+};
+
+/** Runs of one group go one at a time. */
+export const exclusive = defineWorkflow<GroupInput>({
+  name: "exclusive",
+  concurrency: { key: (input) => input.group ?? null, limit: 1 },
+  steps: [groupStep],
+});
+
+/** Runs of one group go two at a time. */
+export const paired = defineWorkflow<GroupInput>({
+  name: "paired",
+  concurrency: { key: (input) => input.group ?? null, limit: 2 },
+  steps: [groupStep],
+});
+
+export const workflows = [pipeline, slow, flaky, doomed, diamond, exclusive, paired];
