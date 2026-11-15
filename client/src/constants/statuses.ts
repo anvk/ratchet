@@ -35,6 +35,7 @@ export const FAILURE_REASON_LABELS: Record<FailureReason, string> = {
   attempts_exhausted: "Out of attempts",
   lost_worker: "Kept losing its worker",
   unknown_step: "No worker knows this step",
+  cancelled: "Cancelled",
 };
 
 /** Pill colours for run statuses. */

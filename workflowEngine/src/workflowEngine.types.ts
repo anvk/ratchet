@@ -226,6 +226,14 @@ export interface WorkflowStore {
    * steps become ready. Returns false, changing nothing, for any other run.
    */
   redriveRun(request: { runId: string }): Promise<boolean>;
+  /**
+   * Stops a run that hasn't finished: steps that haven't started are skipped, a
+   * running step fails with reason `cancelled` (its worker's next heartbeat fails
+   * and its result is rejected), and the run fails with reason `cancelled`,
+   * giving up its slot in a group. Returns false, changing nothing, if the run
+   * doesn't exist or has finished. A cancelled run can be redriven.
+   */
+  cancelRun(request: { runId: string }): Promise<boolean>;
   /** Releases connections or file handles. */
   close(): Promise<void>;
 }
@@ -293,6 +301,8 @@ export interface WorkflowEngine {
    * WorkflowStore.redriveRun.
    */
   redriveRun(runId: string): Promise<boolean>;
+  /** Stops a run that hasn't finished. See WorkflowStore.cancelRun. */
+  cancelRun(runId: string): Promise<boolean>;
   /** Runs a worker until the engine is closed. */
   runWorker(options?: { workerId?: string }): Promise<void>;
   /**

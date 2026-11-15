@@ -126,6 +126,7 @@ export function createWorkflowEngine({
       }
     },
     redriveRun: (runId) => store.redriveRun({ runId }),
+    cancelRun: (runId) => store.cancelRun({ runId }),
     runWorker: ({ workerId } = {}) =>
       track(runWorker({ registry, store, settings, stopSignal: stop.signal, workerId })),
     runOrchestrator: () => track(runOrchestrator({ store, settings, stopSignal: stop.signal })),

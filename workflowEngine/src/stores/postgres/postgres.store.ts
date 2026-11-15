@@ -134,9 +134,11 @@ async function slotsInUse({ trx, key }: { trx: Tx; key: string }): Promise<numbe
 /**
  * Gives free slots in a group to its waiting runs, oldest first, for as long as
  * there are both. Admitting a run readies its steps that need nothing (or whose
- * needs have succeeded, for a redriven run). The only run rows it locks are
- * waiting ones, which no transaction holds while also wanting the group lock.
- * Call it with the group locked.
+ * needs have succeeded, for a redriven run). It locks the run it admits as it
+ * picks it, and skips one that is locked by another transaction: a waiting run
+ * is only locked while it is being cancelled, and that transaction may be
+ * waiting for the group lock this one holds. Runs this transaction already
+ * holds are not skipped. Call it with the group locked.
  */
 async function admitWaitingRuns({ trx, key }: { trx: Tx; key: string }) {
   for (;;) {
@@ -149,11 +151,12 @@ async function admitWaitingRuns({ trx, key }: { trx: Tx; key: string }) {
       .orderBy("created_at")
       .orderBy("id")
       .limit(1)
+      .forUpdate()
+      .skipLocked()
       .executeTakeFirst();
     if (!next) return;
     if ((await slotsInUse({ trx, key })) >= next.concurrency_limit!) return;
 
-    await lockRun({ trx, runId: next.id });
     await trx
       .updateTable("workflow_runs")
       // Not now(), for the same reason as in startRun.
@@ -310,13 +313,24 @@ async function takeStep({
     .returning(["id", "run_id", "name", "position", "attempt"])
     .executeTakeFirstOrThrow();
 
-  // The one place a step's lock comes before its run's: only a run's first
-  // claim changes the run here, and nothing else locks a run before it starts.
+  // This is the one place a step's lock comes before its run's, so it must
+  // never wait for the run. The only thing that locks a run with claimable
+  // steps before it has started is a cancel, which finishes the run itself, so
+  // skipping the update then loses nothing. A lock this transaction already
+  // holds doesn't count as locked, so a claim made inside completeStep still
+  // starts nothing it shouldn't.
   const started = await trx
     .updateTable("workflow_runs")
     .set({ status: "running", started_at: sql<Date>`now()` })
-    .where("id", "=", step.run_id)
-    .where("status", "=", "queued")
+    .where("id", "in", (eb) =>
+      eb
+        .selectFrom("workflow_runs")
+        .select("id")
+        .where("id", "=", step.run_id)
+        .where("status", "=", "queued")
+        .forUpdate()
+        .skipLocked(),
+    )
     .returning("id")
     .executeTakeFirst();
   if (started) await emit({ trx, runId: step.run_id, type: "run_started" });
@@ -449,6 +463,7 @@ async function finishOwnedStep({
  * moment take turns, and the second one sees the first as finished. The order
  * everywhere is the run's lock, then its group's lock (lockGroup), then its
  * steps' locks, so two transactions can never end up waiting on each other.
+ * Cancelling a run takes it too, in its own query (see cancelRun).
  */
 async function lockRun({ trx, runId }: { trx: Tx; runId: string }) {
   await trx
@@ -628,10 +643,17 @@ async function finishRunIfDone({ trx, runId }: { trx: Tx; runId: string }) {
     await emit({ trx, runId, type: "run_succeeded" });
   }
 
-  if (finished.concurrency_key !== null) {
-    await lockGroup({ trx, key: finished.concurrency_key });
-    await admitWaitingRuns({ trx, key: finished.concurrency_key });
-  }
+  await giveUpSlot({ trx, key: finished.concurrency_key });
+}
+
+/**
+ * Lets the waiting runs of a group take the slot a run has just given up, if it
+ * was in a group (a null key does nothing). Call it with the run locked.
+ */
+async function giveUpSlot({ trx, key }: { trx: Tx; key: string | null }) {
+  if (key === null) return;
+  await lockGroup({ trx, key });
+  await admitWaitingRuns({ trx, key });
 }
 
 /**
@@ -936,6 +958,82 @@ async function redriveRun({ runId }: { runId: string }): Promise<boolean> {
   });
 }
 
+/**
+ * Stops a run that hasn't finished: steps that haven't started are skipped, a
+ * running step fails with reason `cancelled`, and the run fails with reason
+ * `cancelled` and gives its slot to the oldest waiting run. Returns false,
+ * changing nothing, if the run doesn't exist or has finished.
+ *
+ * It takes the run's lock first, like everything that changes a run's steps,
+ * so it can't interleave with a step finishing, failing or being swept. The
+ * one thing that takes a step's lock before its run's is a run's first claim
+ * (see takeStep), which never waits for the run, so the two can't deadlock.
+ */
+async function cancelRun({ runId }: { runId: string }): Promise<boolean> {
+  return db.transaction().execute(async (trx) => {
+    // Lock and read in one query: lockRun throws when the row is missing.
+    // FOR NO KEY UPDATE, not FOR UPDATE. It still conflicts with lockRun's FOR
+    // UPDATE, so every other change to the run's steps waits for the cancel, and
+    // with the SKIP LOCKED in takeStep. But it doesn't conflict with the FOR KEY
+    // SHARE that inserting an event takes on the run through its foreign key,
+    // which is what a claim does while it holds a step.
+    const run = await trx
+      .selectFrom("workflow_runs")
+      .select(["finished_at", "concurrency_key"])
+      .where("id", "=", runId)
+      .forNoKeyUpdate()
+      .executeTakeFirst();
+    if (!run || run.finished_at !== null) return false;
+
+    // One statement, deciding per row, never "skip the unstarted" and then "fail
+    // the running": a step could go from ready to running between the two and
+    // be left running in a finished run. When this has to wait for a step that
+    // a claim holds, Postgres re-reads the row once the claim commits and
+    // applies both the WHERE and the CASEs to the new version, so a step
+    // claimed in the meantime is correctly failed. In a SET, `status` on the
+    // right is the row's old value, which the CASEs rely on.
+    const steps = await trx
+      .updateTable("step_runs")
+      .set({
+        status: sql`CASE WHEN status = 'running' THEN 'failed'::step_run_status ELSE 'skipped'::step_run_status END`,
+        error: sql`CASE WHEN status = 'running' THEN 'Run cancelled' ELSE error END`,
+        failure_reason: sql`CASE WHEN status = 'running' THEN 'cancelled'::failure_reason ELSE NULL END`,
+        finished_at: sql<Date>`now()`,
+        lease_expires_at: null,
+      })
+      .where("run_id", "=", runId)
+      .where("status", "in", ["pending", "ready", "running"])
+      .returning(["name", "position", "status", "attempt", "worker_id"])
+      .execute();
+    steps.sort((a, b) => a.position - b.position);
+    for (const step of steps) {
+      if (step.status === "failed") {
+        await emit({
+          trx,
+          runId,
+          type: "step_failed",
+          stepName: step.name,
+          attempt: step.attempt,
+          workerId: step.worker_id ?? undefined,
+          detail: { error: "Run cancelled", failureReason: "cancelled" },
+        });
+      } else {
+        await emit({ trx, runId, type: "step_skipped", stepName: step.name });
+      }
+    }
+
+    await trx
+      .updateTable("workflow_runs")
+      .set({ status: "failed", failure_reason: "cancelled", finished_at: sql<Date>`now()` })
+      .where("id", "=", runId)
+      .execute();
+    await emit({ trx, runId, type: "run_cancelled" });
+
+    await giveUpSlot({ trx, key: run.concurrency_key });
+    return true;
+  });
+}
+
 export function createPostgresStore(): WorkflowStore {
   return {
     syncWorkflows,
@@ -946,6 +1044,7 @@ export function createPostgresStore(): WorkflowStore {
     sweepExpiredLeases,
     failStep,
     redriveRun,
+    cancelRun,
     close: () => db.destroy(),
   };
 }
