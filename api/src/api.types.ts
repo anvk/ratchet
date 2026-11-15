@@ -123,8 +123,14 @@ export interface RunDetail {
  */
 
 /**
+ * `POST /runs/:id/cancel` stops a run that hasn't finished and returns `{ id }`.
+ * `404` if the run doesn't exist, `409` if it has already finished. A cancelled
+ * run is `failed` with `failure_reason` `cancelled`, and can be redriven.
+ */
+
+/**
  * One entry in a run's history. `type` is one of `run_queued`, `run_waiting`, `run_admitted`, `run_started`,
- * `run_succeeded`, `run_failed`, `step_ready`, `step_claimed`, `step_succeeded`,
+ * `run_succeeded`, `run_failed`, `run_cancelled`, `step_ready`, `step_claimed`, `step_succeeded`,
  * `step_failed`, `step_skipped`, `step_lease_expired`, `run_redriven` or
  * `step_retry_scheduled`.
  */
