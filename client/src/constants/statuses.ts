@@ -10,6 +10,7 @@ export const RUN_STATUS_LABELS: Record<WorkflowRunStatus, string> = {
   running: "Running",
   succeeded: "Passed",
   failed: "Failed",
+  cancelled: "Cancelled",
 };
 
 /**
@@ -44,6 +45,7 @@ export const RUN_STATUS_TONES: Record<WorkflowRunStatus, PillTone> = {
   running: "blue",
   succeeded: "green",
   failed: "red",
+  cancelled: "grey",
 };
 
 /** Pill colours for step statuses, matching the step cards on the diagram. */

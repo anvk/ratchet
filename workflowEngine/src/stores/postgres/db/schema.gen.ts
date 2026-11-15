@@ -29,7 +29,7 @@ export type StepRunStatus = "failed" | "pending" | "ready" | "running" | "skippe
 
 export type Timestamp = ColumnType<Date, Date | string, Date | string>;
 
-export type WorkflowRunStatus = "failed" | "queued" | "running" | "succeeded";
+export type WorkflowRunStatus = "cancelled" | "failed" | "queued" | "running" | "succeeded";
 
 export interface Events {
   at: Generated<Timestamp>;

@@ -220,8 +220,8 @@ export interface WorkflowStore {
     failureReason: FailureReason | null;
   }>;
   /**
-   * Resumes a run that failed for a reason in REDRIVABLE_FAILURE_REASONS, from
-   * the steps that didn't succeed, with fresh attempts. Succeeded steps keep
+   * Resumes a run that was cancelled, or that failed for a reason in
+   * REDRIVABLE_FAILURE_REASONS, from the steps that didn't succeed, with fresh attempts. Succeeded steps keep
    * their outputs. A run in a group that is full waits for a slot before its
    * steps become ready. Returns false, changing nothing, for any other run.
    */
@@ -229,8 +229,8 @@ export interface WorkflowStore {
   /**
    * Stops a run that hasn't finished: steps that haven't started are skipped, a
    * running step fails with reason `cancelled` (its worker's next heartbeat fails
-   * and its result is rejected), and the run fails with reason `cancelled`,
-   * giving up its slot in a group. Returns false, changing nothing, if the run
+   * and its result is rejected), and the run becomes `cancelled` (not
+   * failed), giving up its slot in a group. Returns false, changing nothing, if the run
    * doesn't exist or has finished. A cancelled run can be redriven.
    */
   cancelRun(request: { runId: string }): Promise<boolean>;

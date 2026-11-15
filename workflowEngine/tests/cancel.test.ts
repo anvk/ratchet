@@ -105,8 +105,8 @@ test("cancelling a run nobody has started skips every step", async () => {
   assert.equal(await store.cancelRun({ runId }), true);
 
   const run = await runRow(runId);
-  assert.equal(run.status, "failed");
-  assert.equal(run.failure_reason, "cancelled");
+  assert.equal(run.status, "cancelled");
+  assert.equal(run.failure_reason, null);
   assert.notEqual(run.finished_at, null);
   assert.deepEqual(
     (await stepRows(runId)).map((s) => s.status),
@@ -124,12 +124,27 @@ test("cancelling a running run fails its running step and skips the rest", async
   assert.equal(await store.cancelRun({ runId }), true);
 
   const run = await runRow(runId);
-  assert.equal(run.status, "failed");
-  assert.equal(run.failure_reason, "cancelled");
+  assert.equal(run.status, "cancelled");
+  assert.equal(run.failure_reason, null);
   const [work, after] = await stepRows(runId);
   assert.equal(work.status, "failed");
   assert.equal(work.failure_reason, "cancelled");
   assert.equal(work.error, "Run cancelled");
+  assert.equal(after.status, "skipped");
+});
+
+test("a cancelled run is not a failed run", async () => {
+  const runId = await startCancellable({ ms: 1500 });
+  await waitForWork(runId);
+
+  assert.equal(await store.cancelRun({ runId }), true);
+
+  const run = await runRow(runId);
+  assert.equal(run.status, "cancelled");
+  assert.equal(run.failure_reason, null);
+  const [work, after] = await stepRows(runId);
+  assert.equal(work.status, "failed");
+  assert.equal(work.failure_reason, "cancelled");
   assert.equal(after.status, "skipped");
 });
 
@@ -178,8 +193,8 @@ test("a waiting run can be cancelled", async () => {
   assert.equal(await store.cancelRun({ runId: b }), true);
 
   const run = await runRow(b);
-  assert.equal(run.status, "failed");
-  assert.equal(run.failure_reason, "cancelled");
+  assert.equal(run.status, "cancelled");
+  assert.equal(run.failure_reason, null);
   assert.equal(run.admitted_at, null);
   assert.ok((await stepRows(b)).every((s) => s.status === "skipped"));
 
@@ -230,8 +245,8 @@ test("cancelling while workers make their first claims leaves every run finished
       runIds.forEach((runId, i) => {
         const run = runs.find((r) => r.id === runId)!;
         if (cancelled[i]) {
-          assert.equal(run.status, "failed");
-          assert.equal(run.failure_reason, "cancelled");
+          assert.equal(run.status, "cancelled");
+          assert.equal(run.failure_reason, null);
         } else {
           assert.equal(run.status, "succeeded");
         }
@@ -278,8 +293,8 @@ test("cancelling a waiting run while its group's slot frees up never deadlocks",
       assert.equal((await runRow(a)).status, "succeeded");
       const run = await runRow(b);
       if (cancelled) {
-        assert.equal(run.status, "failed");
-        assert.equal(run.failure_reason, "cancelled");
+        assert.equal(run.status, "cancelled");
+        assert.equal(run.failure_reason, null);
       } else {
         assert.equal(run.status, "succeeded");
       }

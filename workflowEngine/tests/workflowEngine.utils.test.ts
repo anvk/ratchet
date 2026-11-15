@@ -99,11 +99,11 @@ test("ancestors leaves out steps running side by side", () => {
   assert.equal(ancestors(diamond, "receive").size, 0);
 });
 
-test("canRedrive allows failures that a fix could cure, not decisions", () => {
+test("canRedrive allows cancelled runs and failures that a fix could cure, not decisions", () => {
+  assert.equal(canRedrive("cancelled", null), true);
   assert.equal(canRedrive("failed", "attempts_exhausted"), true);
   assert.equal(canRedrive("failed", "lost_worker"), true);
   assert.equal(canRedrive("failed", "unknown_step"), true);
-  assert.equal(canRedrive("failed", "cancelled"), true);
   assert.equal(canRedrive("failed", "non_retryable"), false);
   assert.equal(canRedrive("succeeded", null), false);
   assert.equal(canRedrive("running", null), false);

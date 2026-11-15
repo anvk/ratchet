@@ -117,15 +117,16 @@ export interface RunDetail {
 }
 
 /**
- * `POST /runs/:id/redrive` resumes a failed run from the steps that didn't
- * succeed, and returns `{ id }` like starting a run. `404` if the run doesn't
- * exist, `409` if it didn't fail for a reason in REDRIVABLE_FAILURE_REASONS.
+ * `POST /runs/:id/redrive` resumes a cancelled or failed run from the steps
+ * that didn't succeed, and returns `{ id }` like starting a run. `404` if the
+ * run doesn't exist, `409` unless the run was cancelled or failed for a reason
+ * in REDRIVABLE_FAILURE_REASONS.
  */
 
 /**
  * `POST /runs/:id/cancel` stops a run that hasn't finished and returns `{ id }`.
  * `404` if the run doesn't exist, `409` if it has already finished. A cancelled
- * run is `failed` with `failure_reason` `cancelled`, and can be redriven.
+ * run has status `cancelled`, and can be redriven.
  */
 
 /**

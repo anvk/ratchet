@@ -5,7 +5,7 @@
 --   the plan:      workflows, steps
 --   the execution: workflow_runs, step_runs, events
 
-CREATE TYPE workflow_run_status AS ENUM ('queued', 'running', 'succeeded', 'failed');
+CREATE TYPE workflow_run_status AS ENUM ('queued', 'running', 'succeeded', 'failed', 'cancelled');
 
 CREATE TYPE step_run_status AS ENUM (
   'pending',   -- a step it needs has not finished
@@ -23,7 +23,7 @@ CREATE TYPE failure_reason AS ENUM (
   'attempts_exhausted', -- it kept throwing until it ran out of attempts
   'lost_worker',        -- it kept losing its worker until it ran out of attempts
   'unknown_step',       -- no worker running it had code for the step
-  'cancelled'           -- someone cancelled the run; on a step, it was running at the time
+  'cancelled'           -- the step was running when its run was cancelled
 );
 
 -- One row per version of a workflow, copied from the registry at API startup.

@@ -77,7 +77,7 @@ export function runsRoutes({
     }
     if (!(await engine.redriveRun(id))) {
       const body: ErrorResponse = {
-        error: "Only a run that failed for a redrivable reason can be redriven",
+        error: "Only a cancelled run, or one that failed for a redrivable reason, can be redriven",
       };
       return reply.code(409).send(body);
     }

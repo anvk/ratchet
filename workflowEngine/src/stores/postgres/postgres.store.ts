@@ -899,8 +899,9 @@ async function sweepExpiredLeases({ defaults }: { defaults: StepDefaults }): Pro
 }
 
 /**
- * Resumes a run that failed for a redrivable reason: every step that didn't
- * succeed goes back to pending with fresh attempts, and those whose needs have
+ * Resumes a run that was cancelled or that failed for a redrivable reason:
+ * every step that didn't succeed (a cancelled run's failed and skipped steps
+ * too) goes back to pending with fresh attempts, and those whose needs have
  * succeeded become ready. Succeeded steps keep their outputs and never run
  * again. A run in a group takes a slot again like a new run: if the group is
  * full, it waits, and its steps become ready only when it is admitted. Returns
@@ -960,9 +961,9 @@ async function redriveRun({ runId }: { runId: string }): Promise<boolean> {
 
 /**
  * Stops a run that hasn't finished: steps that haven't started are skipped, a
- * running step fails with reason `cancelled`, and the run fails with reason
- * `cancelled` and gives its slot to the oldest waiting run. Returns false,
- * changing nothing, if the run doesn't exist or has finished.
+ * running step fails with reason `cancelled`, and the run becomes `cancelled`
+ * (with no failure reason) and gives its slot to the oldest waiting run.
+ * Returns false, changing nothing, if the run doesn't exist or has finished.
  *
  * It takes the run's lock first, like everything that changes a run's steps,
  * so it can't interleave with a step finishing, failing or being swept. The
@@ -1024,7 +1025,7 @@ async function cancelRun({ runId }: { runId: string }): Promise<boolean> {
 
     await trx
       .updateTable("workflow_runs")
-      .set({ status: "failed", failure_reason: "cancelled", finished_at: sql<Date>`now()` })
+      .set({ status: "cancelled", finished_at: sql<Date>`now()` })
       .where("id", "=", runId)
       .execute();
     await emit({ trx, runId, type: "run_cancelled" });

@@ -41,8 +41,12 @@ export function stepDefaults(settings: WorkflowEngineSettings): StepDefaults {
   return { leaseMs, maxAttempts, backoffMs, maxBackoffMs };
 }
 
-/** Whether a run failed in a way that redriving it could fix. */
+/**
+ * Whether a run can be resumed: one that was cancelled, or one that failed in a
+ * way that redriving it could fix.
+ */
 export function canRedrive(status: WorkflowRunStatus, failureReason: FailureReason | null) {
+  if (status === "cancelled") return true;
   return (
     status === "failed" &&
     failureReason !== null &&
