@@ -106,4 +106,5 @@ What the engine promises. Each guarantee is backed by a test in
   because heartbeats can't run. Give heavy synchronous steps a longer `leaseMs`.
 - **A run that never finishes keeps its concurrency slot.** If no worker can
   claim its steps (for example, no worker has its version), it stays in
-  progress, and the runs waiting behind it in its group wait too.
+  progress, and the runs waiting behind it in its group wait too, until someone
+  cancels it.
