@@ -195,4 +195,31 @@ export const paired = defineWorkflow<GroupInput>({
   steps: [groupStep],
 });
 
-export const workflows = [pipeline, slow, flaky, doomed, diamond, exclusive, paired];
+interface StallingInput {
+  /** How many attempts hang until they time out before one succeeds. */
+  hangAttempts?: number;
+}
+
+/** One step with a time limit, whose first attempts can hang until they are timed out. */
+export const stalling = defineWorkflow<StallingInput>({
+  name: "stalling",
+  steps: [
+    {
+      name: "call",
+      timeoutMs: 300,
+      maxAttempts: 3,
+      backoffMs: 10,
+      async run(ctx) {
+        if (ctx.attempt <= (ctx.input.hangAttempts ?? 0)) {
+          await new Promise<void>((resolve) =>
+            ctx.signal.addEventListener("abort", () => resolve(), { once: true }),
+          );
+          throw new Error("Stopped");
+        }
+        return { attempt: ctx.attempt };
+      },
+    },
+  ],
+});
+
+export const workflows = [pipeline, slow, flaky, doomed, diamond, exclusive, paired, stalling];

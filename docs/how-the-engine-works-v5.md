@@ -53,7 +53,7 @@ Each step is just an async function. It gets a `ctx` (the "context"):
 - `ctx.input`: what the run was started with, such as `{ forceOutcome: "clear" }`;
 - `ctx.outputs`: the results of the steps it depends on, which is how step 2 knows the amount from step 1;
 - `ctx.attempt`: 1 the first time, higher if the step had to run again, after an error (section 11) or because its worker went silent (section 8);
-- `ctx.signal`: fires if this worker loses the step to another one (section 8);
+- `ctx.signal`: fires if this worker loses the step to another one (section 8), or if the attempt runs past its time limit (section 11);
 - `ctx.idempotencyKey`: a stable id for this step (more in section 12).
 
 Whatever the function returns becomes its **output**. If it throws, the attempt **fails**, and the step is retried (section 11). To fail for good straight away, throw a **`NonRetryableError`**.
@@ -65,6 +65,8 @@ Whatever the function returns becomes its **output**. If it throws, the attempt 
 A step can also set **`leaseMs`**: how long its worker may go silent before the step is given to someone else (section 7). `score-risk` sets 10 seconds; steps that don't set one get the engine's default of 30 seconds.
 
 And it can set its **retry policy** (section 11): **`maxAttempts`**, how many times it may run in all, and **`backoffMs`**, the first wait before a retry. `screen-sanctions` calls a flaky vendor, so it gets 4 attempts, starting half a second apart; steps that don't set them get 3 attempts, starting 1 second apart.
+
+And a **time limit**: **`timeoutMs`**, how long one attempt may run before the worker gives up on it (section 11). `screen-sanctions` sets 6 seconds. Steps that don't set one have no limit.
 
 The workflow as a whole can set **`concurrency`**: runs that share a key, such as payments from one account, don't overlap (section 13).
 
@@ -298,6 +300,20 @@ While it waits, the step is `ready` with `ready_at` in the future, so no worker 
 
 **Every step has a limit.** After `maxAttempts` (3 unless the step sets its own), the step fails for good and the run fails with it (section 9). Errors and lost leases both use up attempts. Try the **Sanctions vendor down** preset: the vendor times out on all 4 attempts.
 
+**A step can be stuck without failing.** Everything above starts with a step that throws. A vendor that never answers doesn't throw: the step just waits. Its worker is fine, so heartbeats keep going and the lease keeps renewing (section 7). A lease only proves the **worker** is alive, not that the **step** is getting anywhere. Left alone, the step would run forever, and in a concurrency group it would keep its run's slot forever too (section 13).
+
+So a step can set **`timeoutMs`**, a limit on one attempt. When it passes, the worker fires `ctx.signal`, stops waiting for the step, and records the attempt as failed with the error `Timed out after 6000ms`. From there it's an ordinary failed attempt: it waits out its backoff and runs again, and it counts towards `maxAttempts`. Try the **Sanctions vendor hangs** preset:
+
+```
+0.0s   attempt 1 claimed     the vendor never answers
+6.0s   the time limit passes → ctx.signal fires, step_retry_scheduled ("Timed out after 6000ms")
+6.5s   attempt 2 claimed     the vendor answers → step_succeeded
+```
+
+The worker enforces the limit with a timer of its own; the orchestrator isn't involved and nothing about it is stored. That leaves two cases a timer in the worker can't catch, and the lease already covers both: a worker that died has no timers, and a worker whose event loop is blocked can't run them, but neither can send heartbeats either (section 8).
+
+As with a lost lease, the signal is only a request. If the step's function ignores it, it carries on in the background, and whatever it returns or throws later is thrown away. Its retry may then run while it's still going, which is one more reason for steps with side effects to be safe to repeat (section 12). The limit isn't part of the workflow's version (section 3), so changing it doesn't strand any runs.
+
 **A failure says why.** Every failure is final, so the status is just `failed`. The `failure_reason` column on the step and the run says why, and that tells you what to do about it:
 
 | `failure_reason`     | What happened                                          | What to do                                                   |
@@ -471,15 +487,17 @@ interface WorkflowStore {
 - **A version covers the plan, not the code.** Changing a step's name, needs, lease or retries makes a new version; changing only the code inside `run` doesn't, so old and new workers both claim the same runs.
 - **Lost leases need the orchestrator:** if it isn't running, steps whose worker went silent stay `running`.
 - **A run that never finishes keeps its slot.** A run whose steps no worker can claim, say because no worker has its version, stays in progress, and every run waiting behind it in its group waits too.
+- **A timed-out step isn't stopped.** The worker stops waiting for it, but unless the step honours `ctx.signal` its function keeps running in the background, and may overlap with its own retry.
+- **A step without a time limit can hang forever.** If it never returns and its worker stays alive, nothing gives up on it.
 
-All five are listed in `workflowEngine/guarantees.md`.
+All seven are listed in `workflowEngine/guarantees.md`.
 
 ---
 
 **A good way to learn it:** read the files in this order:
 
 1. `workflows/greeting/workflow.ts` (the simplest workflow);
-2. `workflowEngine.worker.ts` (the loop, the heartbeats, and deciding whether an error can be retried);
+2. `workflowEngine.worker.ts` (the loop, the heartbeats, the time limit, and deciding whether an error can be retried);
 3. `workflowEngine.orchestrator.ts` (the sweep);
 4. `claimStep`, `completeStep` (with `lockRun` and `readyUnblockedSteps`), `failStep`, `extendLease`, `sweepExpiredLeases` and `redriveRun` in `postgres.store.ts` (the database side);
 5. `startRun` and `admitWaitingRuns` (with `lockGroup`) in the same file (concurrency groups).
@@ -490,6 +508,7 @@ Keep the dashboard open while you start a run, and you can watch each part of th
 - **Sanctions match:** a check fails, `post-ledger` (which needs it) is skipped, and the risk check alongside still finishes before the run fails;
 - **Risk check overloads its worker:** a lease expires and another worker takes over;
 - **Flaky sanctions vendor:** a step fails twice, waits, and succeeds on attempt 3;
+- **Sanctions vendor hangs:** a step that never returns is cut off after 6 seconds, and its retry succeeds;
 - **Sanctions vendor down:** a step fails on every attempt, and the run fails as "Out of attempts"; press **Resume from failed step** to redrive it;
 - **Ledger write times out:** the retry that would charge twice, and the unique key that stops it;
 - **Payments from one account (one at a time):** start several, and they queue and run one after another.

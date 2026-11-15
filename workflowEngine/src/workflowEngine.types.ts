@@ -20,7 +20,8 @@ export interface StepContext<Input = any> {
   idempotencyKey: string;
   /**
    * Fires if this worker loses the step's lease, meaning another worker may
-   * already be running it. Stop early if you can: the result will be rejected.
+   * already be running it, or if the attempt runs past the step's `timeoutMs`.
+   * Either way the result won't be used, so stop early if you can.
    */
   signal: AbortSignal;
 }
@@ -54,6 +55,14 @@ export interface StepDefinition<Input = any> {
    * the engine's backoffMs.
    */
   backoffMs?: number;
+  /**
+   * How long one attempt may run. When it passes, `ctx.signal` fires and the
+   * attempt fails like a thrown error, so it is retried while the step has
+   * attempts left. No limit by default. The function itself can't be stopped: if
+   * it ignores the signal it carries on in the background and its result is
+   * discarded.
+   */
+  timeoutMs?: number;
   run(ctx: StepContext<Input>): Promise<unknown>;
 }
 

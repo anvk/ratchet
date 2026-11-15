@@ -43,10 +43,23 @@ function startHeartbeat({
 }
 
 /**
+ * Starts the clock on one attempt. `signal` fires once `timeoutMs` has passed,
+ * unless stopped first. Without a limit it never fires and nothing is scheduled.
+ */
+function startTimeout(timeoutMs: number | undefined) {
+  const timedOut = new AbortController();
+  if (timeoutMs === undefined) return { signal: timedOut.signal, stop: () => {} };
+  const timer = setTimeout(() => timedOut.abort(), timeoutMs);
+  return { signal: timedOut.signal, stop: () => clearTimeout(timer) };
+}
+
+/**
  * Runs one claimed step, sending heartbeats while it runs, and records whether
  * it succeeded or failed. A NonRetryableError fails it for good; any other
- * error is retried while it has attempts left. Returns the run's next step if
- * the store handed it straight to this worker.
+ * error is retried while it has attempts left. A step with a `timeoutMs` that
+ * runs past it is no longer waited for: its signal fires and the attempt fails
+ * like a thrown error. Returns the run's next step if the store handed it
+ * straight to this worker.
  */
 async function executeStep({
   registry,
@@ -76,19 +89,35 @@ async function executeStep({
   }
 
   const heartbeat = startHeartbeat({ store, workerId, claim });
+  const timeout = startTimeout(step.timeoutMs);
   let output: unknown;
   try {
-    output = await step.run({
-      runId: claim.runId,
-      stepName: claim.stepName,
-      attempt: claim.attempt,
-      input: claim.input,
-      outputs: claim.outputs,
-      idempotencyKey: `${claim.runId}:${claim.stepName}`,
-      signal: heartbeat.signal,
+    // Wrapped, so a step that returns a plain value instead of a promise still works.
+    const running = Promise.resolve(
+      step.run({
+        runId: claim.runId,
+        stepName: claim.stepName,
+        attempt: claim.attempt,
+        input: claim.input,
+        outputs: claim.outputs,
+        idempotencyKey: `${claim.runId}:${claim.stepName}`,
+        signal: AbortSignal.any([heartbeat.signal, timeout.signal]),
+      }),
+    );
+    // A timed-out attempt is no longer waited for, so nothing else would catch
+    // what it throws later.
+    running.catch(() => {});
+    const expired = new Promise<never>((_, reject) => {
+      timeout.signal.addEventListener(
+        "abort",
+        () => reject(new Error(`Timed out after ${step.timeoutMs}ms`)),
+        { once: true },
+      );
     });
+    output = await Promise.race([running, expired]);
   } catch (err) {
     heartbeat.stop();
+    timeout.stop();
     const message = err instanceof Error ? err.message : String(err);
     const { recorded, retryInMs, failureReason } = await store.failStep({
       claim,
@@ -107,6 +136,7 @@ async function executeStep({
     return null;
   }
   heartbeat.stop();
+  timeout.stop();
 
   const { completed, next } = await store.completeStep({
     claim,

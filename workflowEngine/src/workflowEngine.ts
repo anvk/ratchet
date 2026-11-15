@@ -41,6 +41,9 @@ export function defineWorkflow<Input = unknown>(
     if (step.leaseMs !== undefined && !(Number.isInteger(step.leaseMs) && step.leaseMs > 0)) {
       throw new Error(`${stepLabel} needs a whole, positive leaseMs`);
     }
+    if (step.timeoutMs !== undefined && !(Number.isInteger(step.timeoutMs) && step.timeoutMs > 0)) {
+      throw new Error(`${stepLabel} needs a whole, positive timeoutMs`);
+    }
     if (
       step.maxAttempts !== undefined &&
       !(Number.isInteger(step.maxAttempts) && step.maxAttempts > 0)

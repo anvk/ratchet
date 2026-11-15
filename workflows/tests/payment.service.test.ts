@@ -85,6 +85,32 @@ test("a vendor timeout is a plain error, so the workflow retries it", async () =
   assert.equal(error.message, "Sanctions vendor timed out");
 });
 
+test("a vendor that hangs never returns a result once the caller gives up", async () => {
+  const controller = new AbortController();
+  const simulation = createSimulation({
+    key: randomUUID(),
+    forceOutcome: "clear",
+    timeScale: 0,
+    signal: controller.signal,
+  });
+  setTimeout(() => controller.abort(), 20);
+  await assert.rejects(screenSanctions({ simulation, hangs: true }));
+});
+
+test("a vendor that hangs rejects when the signal has already fired", async () => {
+  const simulation = createSimulation({
+    key: randomUUID(),
+    forceOutcome: "clear",
+    timeScale: 0,
+    signal: AbortSignal.abort(),
+  });
+  await assert.rejects(screenSanctions({ simulation, hangs: true }));
+});
+
+test("without hangs, the sanctions check still clears", async () => {
+  assert.deepEqual(await screenSanctions({ simulation: instant("clear") }), { result: "clear" });
+});
+
 test("a received payment comes from the given account, or a default one", async () => {
   const paymentId = randomUUID();
   const given = await receivePayment({ paymentId, from: "acct_shared", simulation: instant() });
