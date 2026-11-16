@@ -468,6 +468,8 @@ worker:  holds the step,  wants the run
 
 Neither can move, and neither is doing anything wrong. They arrived in the same few milliseconds, in an unlucky order. The engine deals with deadlocks in three layers.
 
+**Should one ever happen?** No. On every path through the engine that has been thought through, the first layer rules a deadlock out, and that layer is the real protection. But it can happen. The lock order is kept by care, not enforced by anything: one piece of code that takes two locks the other way round brings a deadlock back, and it only shows when two transactions meet at the wrong moment. So the other two layers are a safety net, not the plan. With them, a deadlock costs a second instead of a failed operation, and it leaves a line in the log. That line means the lock order has a hole, and it's worth finding even though nothing failed.
+
 **1. Avoid them: one lock order.** A deadlock needs a circle of waiting. If every transaction takes its locks in the same order, there can't be one, because nobody ever holds a later lock while waiting for an earlier one. The engine's order is **run, then group, then steps** (sections 10 and 13). The few places that can't follow it never wait instead: a run's first claim and the admission of a waiting run both skip a row that's locked (section 14).
 
 **2. Postgres breaks them.** That reasoning covers the paths someone thought about. For the rest, Postgres never lets a deadlock hang. After a second of waiting it looks for a circle, and if it finds one it aborts one of the transactions, undoes everything it did, and lets the other carry on.
