@@ -4,8 +4,10 @@ import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { sql } from "kysely";
+import pg from "pg";
 import { createWorkflowEngine, type ScheduledRun, type WorkflowDefinition } from "../src/index.ts";
 import { db } from "../src/stores/postgres/index.ts";
+import { testDatabaseUrl } from "./test-env.ts";
 import { scheduled, scheduledExclusive } from "./fixtures/workflows.ts";
 
 // Real workers run the fixture workflows' steps. Nothing here waits for a real
@@ -282,4 +284,36 @@ test("two runs can't be recorded for one tick", async () => {
     (err: { code?: string }) => err.code === "23505",
   );
   await waitForFinish([run.id]);
+});
+
+test("a due schedule whose row is locked is skipped, not waited for", async () => {
+  await makeDue(scheduled.name, 400);
+  const { id } = await scheduleRow(scheduled.name);
+  const before = (await scheduledRuns(scheduled.name)).length;
+
+  const holder = new pg.Client({ connectionString: testDatabaseUrl });
+  await holder.connect();
+  try {
+    await holder.query("BEGIN");
+    await holder.query("SELECT id FROM schedules WHERE id = $1 FOR UPDATE", [id]);
+
+    let timer: NodeJS.Timeout | undefined;
+    const timedOut = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("firing waited for a locked schedule")), 2000);
+    });
+    try {
+      assert.equal(await Promise.race([fire([scheduled]), timedOut]), 0);
+    } finally {
+      clearTimeout(timer);
+    }
+    assert.equal((await scheduledRuns(scheduled.name)).length, before);
+  } finally {
+    await holder.query("ROLLBACK").catch(() => {});
+    await holder.end();
+  }
+
+  assert.equal(await fire([scheduled]), 1);
+  const runs = await scheduledRuns(scheduled.name);
+  assert.equal(runs.length, before + 1);
+  await waitForFinish(runs.map((r) => r.id));
 });
