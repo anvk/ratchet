@@ -175,8 +175,9 @@ test("a schedule fires once however many orchestrators try", async () => {
     const runs = await scheduledRuns(scheduled.name);
     assert.equal(runs.length, before + 1);
     assert.equal(runs.filter((r) => r.scheduled_for?.getTime() === dueAt.getTime()).length, 1);
+    // A tick that found this round's run unfinished would start nothing.
+    await waitForFinish(runs.map((r) => r.id));
   }
-  await waitForFinish((await scheduledRuns(scheduled.name)).map((r) => r.id));
 });
 
 test("missed ticks start one run", async () => {
@@ -220,6 +221,93 @@ test("a scheduled run waits for its concurrency group like any other", async () 
   assert.notEqual(finished.admitted_at, null);
 });
 
+/** Creates a schedule of the exclusive workflow whose runs take a second, and returns helpers for it. */
+async function slowSchedule(name: string) {
+  await engine.schedules.create({
+    workflow: scheduledExclusive.name,
+    name,
+    cron: "* * * * *",
+    input: { ms: 1000 },
+  });
+  const row = () => scheduleRow(scheduledExclusive.name, name);
+  const { id } = await row();
+  return {
+    row,
+    /** Makes it due for the tick this many whole minutes ago, and returns that tick. */
+    async makeDue(minutesAgo: number): Promise<Date> {
+      const moved = await db
+        .updateTable("schedules")
+        .set({
+          next_fire_at: sql<Date>`date_trunc('minute', now()) - ${minutesAgo}::int * interval '1 minute'`,
+        })
+        .where("id", "=", id)
+        .returning("next_fire_at")
+        .executeTakeFirstOrThrow();
+      return moved.next_fire_at!;
+    },
+    runs: () =>
+      db.selectFrom("workflow_runs").select(["id"]).where("schedule_id", "=", id).execute(),
+  };
+}
+
+test("a tick starts nothing while the schedule's last run is still going, and says so on that run", async () => {
+  const schedule = await slowSchedule("no-overlap");
+
+  await schedule.makeDue(3);
+  assert.equal(await fire([scheduledExclusive]), 1);
+  const [first] = await schedule.runs();
+  const fired = await schedule.row();
+
+  // The first run takes a second, so this tick finds it unfinished.
+  const skippedTick = await schedule.makeDue(2);
+  assert.equal(await fire([scheduledExclusive]), 0);
+
+  assert.equal((await schedule.runs()).length, 1);
+  const skipped = await schedule.row();
+  assert.deepEqual(skipped.last_fired_at, fired.last_fired_at);
+  assert.ok(skipped.next_fire_at! > (await databaseNow()), "it should wait for its next tick");
+  const events = await eventsOf(first.id, "schedule_tick_skipped");
+  assert.deepEqual(
+    events.map((e) => e.detail),
+    [{ schedule: "no-overlap", scheduledFor: skippedTick.toISOString() }],
+  );
+
+  // Once the run has finished, the next tick starts one again.
+  await waitForFinish([first.id]);
+  await schedule.makeDue(1);
+  assert.equal(await fire([scheduledExclusive]), 1);
+  const runs = await schedule.runs();
+  assert.equal(runs.length, 2);
+  await waitForFinish(runs.map((r) => r.id));
+  assert.equal((await eventsOf(first.id, "schedule_tick_skipped")).length, 1);
+});
+
+test("only a schedule's own unfinished runs make its tick start nothing", async () => {
+  const schedule = await slowSchedule("own-runs-only");
+  const other = await store.startRun({ definition: scheduledExclusive, input: { ms: 1000 } });
+
+  await schedule.makeDue(1);
+  assert.equal(await fire([scheduledExclusive]), 1);
+
+  assert.equal((await eventsOf(other, "schedule_tick_skipped")).length, 0);
+  await waitForFinish([other, ...(await schedule.runs()).map((r) => r.id)]);
+});
+
+test("a redriven run holds back its schedule's next tick until it finishes again", async () => {
+  const schedule = await slowSchedule("redriven");
+  await schedule.makeDue(3);
+  await fire([scheduledExclusive]);
+  const [run] = await schedule.runs();
+  await store.cancelRun({ runId: run.id });
+
+  assert.equal(await store.redriveRun({ runId: run.id }), true);
+  await schedule.makeDue(2);
+  assert.equal(await fire([scheduledExclusive]), 0);
+
+  assert.equal((await eventsOf(run.id, "schedule_tick_skipped")).length, 1);
+  await waitForFinish([run.id]);
+});
+
 test("a schedule of a workflow the orchestrator doesn't have is left alone", async () => {
   const dueAt = await makeDue(scheduledExclusive.name);
   const before = await scheduleRow(scheduledExclusive.name);
@@ -255,12 +343,16 @@ test("the orchestrator starts a due schedule's run", async () => {
   const orchestrator = orchestratorEngine.runOrchestrator();
   try {
     await sleep(100);
-    const before = (await scheduledRuns(scheduled.name)).length;
-    await makeDue(scheduled.name, 40);
+    const dueAt = await makeDue(scheduled.name, 40);
+    /** The run for that tick, once the orchestrator has started it. */
+    const tickRun = async () =>
+      (await scheduledRuns(scheduled.name)).find(
+        (r) => r.scheduled_for?.getTime() === dueAt.getTime(),
+      );
 
-    const run = await waitFor(async () => (await scheduledRuns(scheduled.name)).at(before), 3000);
+    const run = await waitFor(tickRun, 3000);
     await waitForFinish([run.id]);
-    assert.equal((await scheduledRuns(scheduled.name)).at(before)?.status, "succeeded");
+    assert.equal((await tickRun())?.status, "succeeded");
   } finally {
     await orchestratorEngine.close();
     await orchestrator;

@@ -289,10 +289,13 @@ export interface WorkflowStore {
    * Starts a run for each due, unpaused schedule of these workflows, and moves
    * it on to its next tick; a one-time schedule has none afterwards. A schedule
    * starts one run per tick however many processes call this at once. If ticks
-   * were missed, it starts one run and resumes from now. `scheduledRunFor` is called for
-   * each due schedule with its workflow, name and input, and returns the
-   * workflow's code and concurrency group. Schedules of other workflows are left
-   * alone. Returns how many runs it started.
+   * were missed, it starts one run and resumes from now. A tick that comes due
+   * while a run the schedule started hasn't finished starts nothing: it records
+   * a `schedule_tick_skipped` event on that run and the schedule moves on to its
+   * next tick. `scheduledRunFor` is called for each run to start with the
+   * schedule's workflow, name and input, and returns the workflow's code and
+   * concurrency group. Schedules of other workflows are left alone. Returns how
+   * many runs it started; skipped ticks aren't counted.
    */
   fireDueSchedules(request: {
     workflows: WorkflowDefinition[];
@@ -394,8 +397,15 @@ export interface WorkflowEngine {
    * in the workflow's definition, and are not part of a workflow's version. A
    * schedule has a name, unique within its workflow, and the input each of its
    * runs starts with (an empty object by default). Its runs start on whatever
-   * version of the workflow the firing orchestrator has. A tick starts a run
-   * even if the last one is still going, unless `concurrency` prevents it. Every
+   * version of the workflow the firing orchestrator has.
+   *
+   * A schedule never has two of its runs going at once. A tick that comes due
+   * while a run the schedule started hasn't finished starts nothing, and isn't
+   * made up later: that run gets a `schedule_tick_skipped` event and the
+   * schedule waits for its next tick. Only the schedule's own runs count, not
+   * runs started by a call or by another schedule, and a run counts until it has
+   * succeeded, failed or been cancelled, so one waiting in a concurrency group
+   * counts, and so does one that was redriven. Every
    * method throws UnknownWorkflowError for a workflow this engine doesn't have,
    * and InvalidScheduleError for a request that can't be a schedule (see that class).
    */

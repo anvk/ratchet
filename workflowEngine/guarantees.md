@@ -84,6 +84,15 @@ What the engine promises. Each guarantee is backed by a test in
 - **A schedule fires once or repeats, never both.** A schedule with an `at`
   starts one run at that moment and then has no next tick; it never fires
   again. One with a `cron` repeats. An `at` in the past is rejected.
+- **A schedule never has two of its runs going at once.** A tick that comes
+  due while a run the schedule started hasn't finished starts nothing, and
+  isn't made up later; the schedule waits for its next tick. That run gets a
+  `schedule_tick_skipped` event naming the schedule and the tick, so its
+  history shows every tick it held back. Only the schedule's own runs count,
+  and a run counts until it has succeeded, failed or been cancelled, so one
+  waiting in a concurrency group counts, and so does one that was redriven.
+  The check is made under the schedule's lock, in the transaction that would
+  have started the run.
 - **A paused schedule skips its ticks.** It starts nothing while paused, and
   resuming continues from the next tick after now, with no run for the ticks it
   skipped. A one-time schedule has no other tick to skip to, so one paused
@@ -96,7 +105,8 @@ What the engine promises. Each guarantee is backed by a test in
 - **An orchestrator only fires schedules of its own workflows.** A schedule of
   a workflow it doesn't have is left alone, without an error.
 - **A scheduled run is an ordinary run.** It goes through the same code as
-  `startRun`, so concurrency groups, admission and events apply to it.
+  `startRun`, so concurrency groups, admission and events apply to it. The one
+  difference is that it holds back its schedule's next tick until it finishes.
 - **A repeated key starts one run.** Starting a run with an idempotency key the
   caller already used returns the existing run.
 - **Each step has a stable key.** `ctx.idempotencyKey` is the same on every
@@ -142,5 +152,5 @@ What the engine promises. Each guarantee is backed by a test in
 - **Schedule times are UTC and to the minute,** and a run starts up to
   `sweepIntervalMs` after its minute. A one-time schedule's `at` is used as
   given.
-- **A tick starts a run even if the previous one is still going,** unless the
-  workflow's `concurrency` prevents it.
+- **A schedule can't be told to let its runs overlap.** For runs that may
+  overlap, create a second schedule or start them with `startRun`.

@@ -5,8 +5,8 @@ import type { PillTone } from "../components/Pill";
  * for failures, blue for work starting (including a failed or cancelled run
  * resumed, or a queued run getting its slot), amber for a step that will run
  * again (a retry, or a lease lost by a silent worker), and grey for waiting
- * (including a run whose group is full), for a cancelled run, or for steps that
- * won't run. Unknown types show grey.
+ * (including a run whose group is full), for a cancelled run, or for steps and
+ * schedule ticks that won't run. Unknown types show grey.
  */
 export const EVENT_TONES: Record<string, PillTone> = {
   run_queued: "grey",
@@ -17,6 +17,7 @@ export const EVENT_TONES: Record<string, PillTone> = {
   run_failed: "red",
   run_cancelled: "grey",
   run_redriven: "blue",
+  schedule_tick_skipped: "grey",
   step_ready: "grey",
   step_claimed: "blue",
   step_succeeded: "green",

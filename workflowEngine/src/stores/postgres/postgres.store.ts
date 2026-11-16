@@ -1249,8 +1249,24 @@ async function setSchedulePaused({
   });
 }
 
-/** The most due schedules one fireDueSchedules call starts, so one call can't run forever. */
+/** The most due schedules one fireDueSchedules call handles, so one call can't run forever. */
 const MAX_FIRES_PER_CALL = 100;
+
+/**
+ * The oldest run this schedule started that hasn't finished, if there is one.
+ * A finished run that was redriven is unfinished again.
+ */
+function unfinishedRunOf({ trx, scheduleId }: { trx: Tx; scheduleId: string }) {
+  return trx
+    .selectFrom("workflow_runs")
+    .select("id")
+    .where("schedule_id", "=", scheduleId)
+    .where("finished_at", "is", null)
+    .orderBy("created_at")
+    .orderBy("id")
+    .limit(1)
+    .executeTakeFirst();
+}
 
 /**
  * Starts a run for each due, unpaused schedule of the given workflows and moves
@@ -1262,6 +1278,13 @@ const MAX_FIRES_PER_CALL = 100;
  * more ticks). They commit together, so a schedule is never left due after its
  * run started, or advanced without its run. `scheduledRunFor` supplies the run's code
  * and concurrency group from the row's input.
+ *
+ * A tick that finds a run the schedule started still unfinished starts no run.
+ * It writes a schedule_tick_skipped event on that run, which is the one thing
+ * the skipped tick has to do with, and the schedule still moves forward. The
+ * check takes no lock on the run: the schedule's row lock means no other firing
+ * can be starting one, and a run that finishes a moment later only means a
+ * tick was skipped that needn't have been.
  *
  * The lock is FOR UPDATE SKIP LOCKED, like claimStep's: an orchestrator that
  * finds the row locked by another doesn't wait for it, it moves on, and by the
@@ -1276,8 +1299,9 @@ const MAX_FIRES_PER_CALL = 100;
  * the database's, read in the same statement that finds the due row.
  *
  * Lock order: the schedule's row lock is the outermost, before the group lock
- * and the run's and steps' locks that starting a run takes. Nothing holding a
- * run or group lock ever asks for a schedule row.
+ * and the run's and steps' locks that starting a run takes. The skipped tick's
+ * event takes only the key-share lock every event takes on its run. Nothing
+ * holding a run or group lock ever asks for a schedule row.
  */
 async function fireDueSchedules({
   workflows,
@@ -1312,36 +1336,46 @@ async function fireDueSchedules({
         .forUpdate()
         .skipLocked()
         .executeTakeFirst();
-      if (!due) return false;
+      if (!due) return null;
 
       // Due rows have a next_fire_at: the query above compares it.
       const scheduledFor = due.next_fire_at!;
-      const { definition, concurrency } = scheduledRunFor({
-        workflow: due.workflow,
-        name: due.name,
-        input: due.input,
-      });
-      await insertRun({
-        trx,
-        definition,
-        input: due.input,
-        concurrency,
-        schedule: { id: due.id, name: due.name, scheduledFor },
-      });
+      const unfinished = await unfinishedRunOf({ trx, scheduleId: due.id });
+      if (unfinished) {
+        await emit({
+          trx,
+          runId: unfinished.id,
+          type: "schedule_tick_skipped",
+          detail: { schedule: due.name, scheduledFor },
+        });
+      } else {
+        const { definition, concurrency } = scheduledRunFor({
+          workflow: due.workflow,
+          name: due.name,
+          input: due.input,
+        });
+        await insertRun({
+          trx,
+          definition,
+          input: due.input,
+          concurrency,
+          schedule: { id: due.id, name: due.name, scheduledFor },
+        });
+      }
 
       const after = new Date(Math.max(scheduledFor.getTime(), due.now.getTime()));
       await trx
         .updateTable("schedules")
         .set({
           next_fire_at: due.cron === null ? null : nextFireAfter({ cron: due.cron, after }),
-          last_fired_at: due.now,
+          ...(unfinished ? {} : { last_fired_at: due.now }),
         })
         .where("id", "=", due.id)
         .execute();
-      return true;
+      return unfinished ? "skipped" : "started";
     });
     if (!fired) break;
-    started++;
+    if (fired === "started") started++;
   }
   return started;
 }
