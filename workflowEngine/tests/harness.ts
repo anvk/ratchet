@@ -1,9 +1,11 @@
 import { adminUrl, TEST_DATABASE, testDatabaseUrl } from "./test-env.ts";
 
+import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { sql } from "kysely";
 import pg from "pg";
 import { createWorkflowEngine, FINISHED_RUN_STATUSES } from "../src/index.ts";
 import { createPostgresStore, db } from "../src/stores/postgres/index.ts";
@@ -82,4 +84,23 @@ export async function waitForFinish(runIds: string[], timeoutMs = 60_000) {
     await sleep(50);
   }
   throw new Error("Runs did not finish in time");
+}
+
+/** How many deadlocks Postgres has detected in the test database so far. */
+async function deadlockCount() {
+  const { rows } = await sql<{
+    deadlocks: string;
+  }>`SELECT deadlocks FROM pg_stat_database WHERE datname = current_database()`.execute(db);
+  return Number(rows[0].deadlocks);
+}
+
+/**
+ * Runs a race and asserts Postgres detected no deadlock during it. The counter
+ * can lag a moment, so it is read again after a pause.
+ */
+export async function withoutDeadlocks(race: () => Promise<void>) {
+  const before = await deadlockCount();
+  await race();
+  await sleep(1500);
+  assert.equal(await deadlockCount(), before, "Postgres detected a deadlock");
 }

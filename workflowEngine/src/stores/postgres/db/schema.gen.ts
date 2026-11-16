@@ -43,11 +43,14 @@ export interface Events {
 }
 
 export interface Schedules {
-  cron: string;
+  created_at: Generated<Timestamp>;
+  cron: string | null;
   id: Generated<string>;
+  input: Generated<Json>;
   last_fired_at: Timestamp | null;
   name: string;
-  next_fire_at: Timestamp;
+  next_fire_at: Timestamp | null;
+  paused_at: Timestamp | null;
   workflow: string;
 }
 

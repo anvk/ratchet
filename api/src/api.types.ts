@@ -98,9 +98,10 @@ export interface ScheduleInfo {
   workflow: string;
   workflow_title: string;
   name: string;
-  /** Five fields, in UTC. */
-  cron: string;
-  next_fire_at: string;
+  /** Five fields, in UTC. Null for a schedule that fires once. */
+  cron: string | null;
+  /** Null once a schedule that fires once has fired. */
+  next_fire_at: string | null;
   /** Null until it has fired once. */
   last_fired_at: string | null;
 }

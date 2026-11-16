@@ -5,6 +5,7 @@ import { test } from "node:test";
 import { DEFAULT_ENGINE_SETTINGS } from "../src/workflowEngine.constants.ts";
 import {
   ancestors,
+  assertCronFires,
   assertUnique,
   canRedrive,
   dependents,
@@ -318,5 +319,21 @@ test("nextFireAfter throws for a date that never exists", () => {
 test("nextFireAfter throws the parse error for a bad expression", () => {
   assert.throws(() => nextFireAfter({ cron: "61 * * * *", after: utc(2026, 1, 1) }), {
     message: 'Cron "61 * * * *": minute 61 is out of range 0-59',
+  });
+});
+
+test("assertCronFires accepts an expression that fires", () => {
+  assert.doesNotThrow(() => assertCronFires("*/30 9-17 * * 1-5"));
+});
+
+test("assertCronFires throws the parse error for a bad expression", () => {
+  assert.throws(() => assertCronFires("61 * * * *"), {
+    message: 'Cron "61 * * * *": minute 61 is out of range 0-59',
+  });
+});
+
+test("assertCronFires throws for an expression that never fires", () => {
+  assert.throws(() => assertCronFires("0 0 31 2 *"), {
+    message: 'Cron "0 0 31 2 *" never fires',
   });
 });

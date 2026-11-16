@@ -12,7 +12,7 @@ export type {
   ClaimOrder,
   FinalFailure,
   Registry,
-  ScheduleToFire,
+  ScheduledRun,
   StepDefaults,
   StepContext,
   StepDefinition,
@@ -20,7 +20,6 @@ export type {
   WorkflowDefinition,
   WorkflowEngine,
   WorkflowEngineSettings,
-  WorkflowSchedule,
   WorkflowStore,
 } from "./workflowEngine.types.ts";
 export { closeOnSignals, createWorkflowEngine, defineWorkflow } from "./workflowEngine.ts";

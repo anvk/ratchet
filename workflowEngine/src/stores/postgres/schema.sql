@@ -56,21 +56,30 @@ CREATE TABLE steps (
   UNIQUE (workflow_id, position)
 );
 
--- One row per schedule of a workflow, saved by sync. The orchestrator fires a
--- schedule when next_fire_at has passed, and moves it forward in the same
--- transaction that starts the run.
+-- One row per schedule: a workflow to start, when, and with what. Created and
+-- changed through the engine; the orchestrator fires a schedule when
+-- next_fire_at has passed and it isn't paused.
 CREATE TABLE schedules (
   id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   workflow      text NOT NULL,            -- the workflow's name
   name          text NOT NULL,
-  cron          text NOT NULL,            -- kept to notice when it changes
-  next_fire_at  timestamptz NOT NULL,
+  -- Null for a schedule that fires once, at next_fire_at.
+  cron          text,
+  -- What each of its runs starts with.
+  input         jsonb NOT NULL DEFAULT '{}',
+  -- Set while the schedule is paused. A paused schedule skips its ticks.
+  paused_at     timestamptz,
+  -- Null once a one-time schedule has fired: it has nothing more to fire.
+  next_fire_at  timestamptz,
   last_fired_at timestamptz,
+  created_at    timestamptz NOT NULL DEFAULT now(),
+  -- A repeating schedule always has a next tick.
+  CHECK (cron IS NULL OR next_fire_at IS NOT NULL),
   UNIQUE (workflow, name)
 );
 
 -- Lets the orchestrator find due schedules without reading them all.
-CREATE INDEX schedules_due_idx ON schedules (next_fire_at);
+CREATE INDEX schedules_due_idx ON schedules (next_fire_at) WHERE paused_at IS NULL;
 
 CREATE TABLE workflow_runs (
   id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),

@@ -18,6 +18,8 @@ export function fakeStore({
     claims: 0,
     completed: 0,
     closed: 0,
+    /** How many schedule methods the engine called on the store. */
+    scheduleCalls: 0,
     /** The output of each completeStep call, in order. */
     outputs: [] as unknown[],
     /** The error and final of each failStep call, in order. */
@@ -55,6 +57,22 @@ export function fakeStore({
     redriveRun: async () => false,
     cancelRun: async () => false,
     sweepExpiredLeases: async () => 0,
+    createSchedule: async () => {
+      calls.scheduleCalls++;
+      return true;
+    },
+    updateSchedule: async () => {
+      calls.scheduleCalls++;
+      return true;
+    },
+    deleteSchedule: async () => {
+      calls.scheduleCalls++;
+      return true;
+    },
+    setSchedulePaused: async () => {
+      calls.scheduleCalls++;
+      return true;
+    },
     fireDueSchedules: async () => 0,
     close: async () => {
       calls.closed++;

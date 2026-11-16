@@ -1,14 +1,14 @@
 import { DEFAULT_ENGINE_SETTINGS } from "./workflowEngine.constants.ts";
 import type {
   Registry,
-  ScheduleToFire,
+  ScheduledRun,
   WorkflowDefinition,
   WorkflowEngine,
   WorkflowEngineSettings,
   WorkflowStore,
 } from "./workflowEngine.types.ts";
 import { UnknownWorkflowError } from "./workflowEngine.errors.ts";
-import { assertUnique, nextFireAfter } from "./workflowEngine.utils.ts";
+import { assertCronFires, assertUnique } from "./workflowEngine.utils.ts";
 import { runOrchestrator } from "./workflowEngine.orchestrator.ts";
 import { runWorker } from "./workflowEngine.worker.ts";
 
@@ -58,20 +58,6 @@ export function defineWorkflow<Input = unknown>(
       throw new Error(`${stepLabel} needs a whole backoffMs of 0 or more`);
     }
   }
-  if (definition.schedules) {
-    assertUnique(
-      definition.schedules.map((s) => s.name),
-      `schedule in ${definition.name}`,
-    );
-    for (const schedule of definition.schedules) {
-      try {
-        nextFireAfter({ cron: schedule.cron, after: new Date() });
-      } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        throw new Error(`Schedule ${definition.name}/${schedule.name}: ${reason}`);
-      }
-    }
-  }
   return definition;
 }
 
@@ -91,25 +77,6 @@ function concurrencyFor({
   return definition.concurrency && key != null
     ? { key, limit: definition.concurrency.limit }
     : undefined;
-}
-
-/**
- * Lists every schedule of the given workflows with what its runs start with:
- * the schedule's input (an empty object when it has none) and the concurrency
- * group that input belongs to.
- */
-function schedulesToFire(workflows: WorkflowDefinition[]): ScheduleToFire[] {
-  return workflows.flatMap((definition) =>
-    (definition.schedules ?? []).map((schedule) => {
-      const input = schedule.input ?? {};
-      return {
-        definition,
-        name: schedule.name,
-        input,
-        concurrency: concurrencyFor({ definition, input }),
-      };
-    }),
-  );
 }
 
 /**
@@ -159,9 +126,69 @@ export function createWorkflowEngine({
     clearTimeout(timer);
   }
 
+  /** Throws UnknownWorkflowError, or an Error for an empty name, so nothing reaches the store. */
+  function assertScheduleTarget({ workflow, name }: { workflow: string; name: string }) {
+    if (!registry.has(workflow)) throw new UnknownWorkflowError(workflow);
+    if (name.trim() === "") throw new Error("A schedule needs a name");
+  }
+
+  /** Throws unless `at` is a valid date. Whether it is in the future is for the store, which has the database's clock. */
+  function assertValidAt(at: Date) {
+    if (Number.isNaN(at.getTime())) throw new Error("A schedule's `at` isn't a valid date");
+  }
+
+  const schedules: WorkflowEngine["schedules"] = {
+    async create({ workflow, name, cron, at, input }) {
+      assertScheduleTarget({ workflow, name });
+      if ((cron === undefined) === (at === undefined)) {
+        throw new Error("A schedule needs exactly one of `cron` and `at`");
+      }
+      if (cron !== undefined) assertCronFires(cron);
+      if (at !== undefined) assertValidAt(at);
+      return store.createSchedule({ workflow, name, cron, at, input: input ?? {} });
+    },
+    async update({ workflow, name, cron, at, input }) {
+      assertScheduleTarget({ workflow, name });
+      if (cron === undefined && at === undefined && input === undefined) {
+        throw new Error("An update needs at least one of `cron`, `at` and `input`");
+      }
+      if (cron !== undefined && at !== undefined) {
+        throw new Error("A schedule has either `cron` or `at`, not both");
+      }
+      if (cron !== undefined) assertCronFires(cron);
+      if (at !== undefined) assertValidAt(at);
+      return store.updateSchedule({ workflow, name, cron, at, input });
+    },
+    async delete({ workflow, name }) {
+      assertScheduleTarget({ workflow, name });
+      return store.deleteSchedule({ workflow, name });
+    },
+    async pause({ workflow, name }) {
+      assertScheduleTarget({ workflow, name });
+      return store.setSchedulePaused({ workflow, name, paused: true });
+    },
+    async resume({ workflow, name }) {
+      assertScheduleTarget({ workflow, name });
+      return store.setSchedulePaused({ workflow, name, paused: false });
+    },
+  };
+
+  /** What a due schedule's run needs: its workflow's code, and the concurrency group its input falls in. */
+  function prepareScheduledRun({
+    workflow,
+    input,
+  }: {
+    workflow: string;
+    input: unknown;
+  }): ScheduledRun {
+    const definition = registry.get(workflow)!;
+    return { definition, concurrency: concurrencyFor({ definition, input }) };
+  }
+
   return {
     registry,
     settings,
+    schedules,
     sync: () => store.syncWorkflows(workflows),
     startRun({ workflow, input, idempotencyKey }) {
       const definition = registry.get(workflow);
@@ -177,15 +204,14 @@ export function createWorkflowEngine({
     cancelRun: (runId) => store.cancelRun({ runId }),
     runWorker: ({ workerId } = {}) =>
       track(runWorker({ registry, store, settings, stopSignal: stop.signal, workerId })),
-    // Built here, not when the engine is created, so a process that never runs
-    // an orchestrator never evaluates schedule keys.
     runOrchestrator: () =>
       track(
         runOrchestrator({
           store,
           settings,
           stopSignal: stop.signal,
-          schedules: schedulesToFire(workflows),
+          workflows,
+          prepare: prepareScheduledRun,
         }),
       ),
     async close({ force = false } = {}) {

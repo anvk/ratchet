@@ -13,8 +13,6 @@ export default describeWorkflow<GreetingInput>({
   name: "greeting",
   title: "Send a greeting",
   description: "A three-step example showing how little a new workflow needs.",
-  // Starts a greeting every minute, so there is a scheduled run to look at.
-  schedules: [{ name: "every-minute", cron: "* * * * *", input: { name: "the scheduler" } }],
   steps: [
     {
       name: "choose-recipient",

@@ -1,6 +1,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import type {
-  ScheduleToFire,
+  ScheduledRun,
+  WorkflowDefinition,
   WorkflowEngineSettings,
   WorkflowStore,
 } from "./workflowEngine.types.ts";
@@ -10,19 +11,23 @@ import { stepDefaults } from "./workflowEngine.utils.ts";
  * Looks after runs as a whole, rather than single steps, until stopSignal
  * fires. Every sweepIntervalMs it does two jobs: the lease sweep, which makes
  * steps whose worker stopped sending heartbeats ready again, and starting a run
- * for each of `schedules` that is due. Either failing doesn't skip the other.
+ * for each due, unpaused schedule of `workflows`. Either failing doesn't skip
+ * the other.
  * Any number of orchestrators can run at once.
  */
 export async function runOrchestrator({
   store,
   settings,
   stopSignal,
-  schedules,
+  workflows,
+  prepare,
 }: {
   store: WorkflowStore;
   settings: WorkflowEngineSettings;
   stopSignal: AbortSignal;
-  schedules: ScheduleToFire[];
+  workflows: WorkflowDefinition[];
+  /** Works out a due schedule's run. See WorkflowStore.fireDueSchedules. */
+  prepare: (schedule: { workflow: string; name: string; input: unknown }) => ScheduledRun;
 }) {
   const { sweepIntervalMs } = settings;
 
@@ -30,8 +35,7 @@ export async function runOrchestrator({
   const wait = (ms: number) => sleep(ms, undefined, { signal: stopSignal }).catch(() => {});
 
   console.log(
-    `[orchestrator] sweeping expired leases every ${sweepIntervalMs}ms` +
-      (schedules.length > 0 ? `, watching ${schedules.length} schedule(s)` : ""),
+    `[orchestrator] sweeping expired leases and firing due schedules every ${sweepIntervalMs}ms`,
   );
 
   while (!stopSignal.aborted) {
@@ -43,7 +47,7 @@ export async function runOrchestrator({
       console.error("[orchestrator] sweep failed:", err instanceof Error ? err.message : err);
     }
     try {
-      const started = await store.fireDueSchedules({ schedules });
+      const started = await store.fireDueSchedules({ workflows, prepare });
       if (started > 0) console.log(`[orchestrator] started ${started} scheduled run(s)`);
     } catch (err) {
       console.error("[orchestrator] schedules failed:", err instanceof Error ? err.message : err);

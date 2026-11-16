@@ -15,7 +15,7 @@ import type {
   ClaimOrder,
   EventFields,
   FinalFailure,
-  ScheduleToFire,
+  ScheduledRun,
   StepDefaults,
   WorkflowDefinition,
   WorkflowStore,
@@ -76,91 +76,38 @@ function hashPlan(definition: WorkflowDefinition): string {
   return createHash("sha256").update(JSON.stringify(plan)).digest("hex").slice(0, 12);
 }
 
-/**
- * Copies workflows into the plan tables, and their schedules into the schedules
- * table. Unchanged workflows and schedules are left alone. A workflow's plan and
- * schedules are saved in one transaction, so a plan that already existed still
- * has its schedules synced.
- */
+/** Copies workflows into the plan tables. Workflows already saved are left alone. */
 async function syncWorkflows(workflows: WorkflowDefinition[]) {
   for (const definition of workflows) {
     await db.transaction().execute(async (trx) => {
-      const version = planVersion(definition);
       const created = await trx
         .insertInto("workflows")
         .values({
           name: definition.name,
-          version,
+          version: planVersion(definition),
         })
         .onConflict((oc) => oc.columns(["name", "version"]).doNothing())
         .returning("id")
         .executeTakeFirst();
+      if (!created) return;
 
-      if (created) {
-        const links = resolveNeeds(definition.steps);
-        await trx
-          .insertInto("steps")
-          .values(
-            definition.steps.map((step, position) => ({
-              workflow_id: created.id,
-              name: step.name,
-              position,
-              needs: links[position].needs,
-              lease_ms: step.leaseMs ?? null,
-              max_attempts: step.maxAttempts ?? null,
-              backoff_ms: step.backoffMs ?? null,
-            })),
-          )
-          .execute();
-      }
-
-      await syncSchedules({ trx, definition });
+      const links = resolveNeeds(definition.steps);
+      await trx
+        .insertInto("steps")
+        .values(
+          definition.steps.map((step, position) => ({
+            workflow_id: created.id,
+            name: step.name,
+            position,
+            needs: links[position].needs,
+            lease_ms: step.leaseMs ?? null,
+            max_attempts: step.maxAttempts ?? null,
+            backoff_ms: step.backoffMs ?? null,
+          })),
+        )
+        .execute();
     });
   }
-}
-
-/**
- * Makes the schedules table match what a workflow declares. A new schedule
- * starts from its next tick, counted from the database's now. One whose cron
- * changed is rescheduled from now. One whose cron is the same is not written
- * at all, so a restart never loses a pending tick. Rows of this workflow that
- * it no longer declares are deleted. Other workflows' rows are never touched.
- */
-async function syncSchedules({ trx, definition }: { trx: Tx; definition: WorkflowDefinition }) {
-  const { rows } = await sql<{ now: Date }>`SELECT now() AS now`.execute(trx);
-  const now = rows[0].now;
-
-  const declared = definition.schedules ?? [];
-  for (const schedule of declared) {
-    const nextFireAt = nextFireAfter({ cron: schedule.cron, after: now });
-    await trx
-      .insertInto("schedules")
-      .values({
-        workflow: definition.name,
-        name: schedule.name,
-        cron: schedule.cron,
-        next_fire_at: nextFireAt,
-      })
-      .onConflict((oc) =>
-        oc
-          .columns(["workflow", "name"])
-          .doUpdateSet({ cron: schedule.cron, next_fire_at: nextFireAt })
-          .where("schedules.cron", "<>", schedule.cron),
-      )
-      .execute();
-  }
-
-  let removed = trx.deleteFrom("schedules").where("workflow", "=", definition.name);
-  // NOT IN with an empty list would match nothing, so a workflow that
-  // declares none is deleted by workflow alone.
-  if (declared.length > 0) {
-    removed = removed.where(
-      "name",
-      "not in",
-      declared.map((schedule) => schedule.name),
-    );
-  }
-  await removed.execute();
 }
 
 /**
@@ -1122,24 +1069,201 @@ async function cancelRun({ runId }: { runId: string }): Promise<boolean> {
   });
 }
 
+/**
+ * The database's clock right now, not as of the transaction's start, which can
+ * be earlier than a row lock was won. Schedules are timed by it, never by the
+ * process's.
+ */
+async function databaseNow(trx: Tx): Promise<Date> {
+  const { rows } = await sql<{ now: Date }>`SELECT clock_timestamp() AS now`.execute(trx);
+  return rows[0].now;
+}
+
+/** Throws unless `at` is after `now`: a moment that has passed can't be scheduled. */
+function assertAfterNow({ at, now }: { at: Date; now: Date }) {
+  if (at <= now) throw new Error(`A schedule's \`at\` (${at.toISOString()}) isn't in the future`);
+}
+
+/**
+ * Saves a schedule, or returns false if the workflow already has one with this
+ * name. One transaction, so the database's now, which the first tick or the
+ * check of `at` is counted from, is the same one the row is created at.
+ */
+async function createSchedule({
+  workflow,
+  name,
+  cron,
+  at,
+  input,
+}: {
+  workflow: string;
+  name: string;
+  cron?: string;
+  at?: Date;
+  input: unknown;
+}): Promise<boolean> {
+  return db.transaction().execute(async (trx) => {
+    const now = await databaseNow(trx);
+    if (at !== undefined) assertAfterNow({ at, now });
+    const created = await trx
+      .insertInto("schedules")
+      .values({
+        workflow,
+        name,
+        cron: cron ?? null,
+        input: JSON.stringify(input),
+        next_fire_at: cron !== undefined ? nextFireAfter({ cron, after: now }) : at!,
+      })
+      .onConflict((oc) => oc.columns(["workflow", "name"]).doNothing())
+      .returning("id")
+      .executeTakeFirst();
+    return created !== undefined;
+  });
+}
+
+/**
+ * Changes a schedule, or returns false if it doesn't exist or is a one-time
+ * schedule that has fired. Locks the schedule's row first, so an edit and a
+ * firing take turns, and the cron it compares with is the one that is saved.
+ * Lock order: only the schedule's row, nothing else.
+ */
+async function updateSchedule({
+  workflow,
+  name,
+  cron,
+  at,
+  input,
+}: {
+  workflow: string;
+  name: string;
+  cron?: string;
+  at?: Date;
+  input?: unknown;
+}): Promise<boolean> {
+  return db.transaction().execute(async (trx) => {
+    const row = await trx
+      .selectFrom("schedules")
+      .select(["id", "cron", "next_fire_at"])
+      .where("workflow", "=", workflow)
+      .where("name", "=", name)
+      .forUpdate()
+      .executeTakeFirst();
+    if (!row) return false;
+
+    if (cron !== undefined && row.cron === null) {
+      throw new Error(`Schedule ${workflow}/${name} fires once, so it has no cron to change`);
+    }
+    if (at !== undefined && row.cron !== null) {
+      throw new Error(`Schedule ${workflow}/${name} repeats, so it has no \`at\` to change`);
+    }
+    if (at !== undefined && row.next_fire_at === null) return false;
+
+    const now = await databaseNow(trx);
+    if (at !== undefined) assertAfterNow({ at, now });
+    const changes = {
+      ...(cron !== undefined && cron !== row.cron
+        ? { cron, next_fire_at: nextFireAfter({ cron, after: now }) }
+        : {}),
+      ...(at !== undefined ? { next_fire_at: at } : {}),
+      ...(input !== undefined ? { input: JSON.stringify(input) } : {}),
+    };
+    // Giving the cron it already has changes nothing, and an UPDATE needs something to set.
+    if (Object.keys(changes).length > 0) {
+      await trx.updateTable("schedules").set(changes).where("id", "=", row.id).execute();
+    }
+    return true;
+  });
+}
+
+/** Removes a schedule, or returns false if it doesn't exist. Its runs stay, their schedule_id set to null. */
+async function deleteSchedule({
+  workflow,
+  name,
+}: {
+  workflow: string;
+  name: string;
+}): Promise<boolean> {
+  const deleted = await db
+    .deleteFrom("schedules")
+    .where("workflow", "=", workflow)
+    .where("name", "=", name)
+    .returning("id")
+    .executeTakeFirst();
+  return deleted !== undefined;
+}
+
+/**
+ * Pauses or resumes a schedule, or returns false if it doesn't exist or is
+ * already in that state. Pausing is one statement. Resuming locks the row, then
+ * clears paused_at and, for a repeating schedule, moves next_fire_at to the
+ * first tick after now, so the ticks skipped while paused start no runs. A
+ * one-time schedule keeps its moment.
+ */
+async function setSchedulePaused({
+  workflow,
+  name,
+  paused,
+}: {
+  workflow: string;
+  name: string;
+  paused: boolean;
+}): Promise<boolean> {
+  if (paused) {
+    const updated = await db
+      .updateTable("schedules")
+      .set({ paused_at: sql<Date>`now()` })
+      .where("workflow", "=", workflow)
+      .where("name", "=", name)
+      .where("paused_at", "is", null)
+      .returning("id")
+      .executeTakeFirst();
+    return updated !== undefined;
+  }
+  return db.transaction().execute(async (trx) => {
+    const row = await trx
+      .selectFrom("schedules")
+      .select(["id", "cron", "paused_at"])
+      .where("workflow", "=", workflow)
+      .where("name", "=", name)
+      .forUpdate()
+      .executeTakeFirst();
+    if (!row || row.paused_at === null) return false;
+
+    await trx
+      .updateTable("schedules")
+      .set({
+        paused_at: null,
+        ...(row.cron !== null
+          ? { next_fire_at: nextFireAfter({ cron: row.cron, after: await databaseNow(trx) }) }
+          : {}),
+      })
+      .where("id", "=", row.id)
+      .execute();
+    return true;
+  });
+}
+
 /** The most due schedules one fireDueSchedules call starts, so one call can't run forever. */
 const MAX_FIRES_PER_CALL = 100;
 
 /**
- * Starts a run for each given schedule that is due and moves it to its next
- * tick, and returns how many runs it started. Every schedule must have been
- * saved by syncWorkflows, or it throws, naming it, and starts nothing.
+ * Starts a run for each due, unpaused schedule of the given workflows and moves
+ * it to its next tick, and returns how many runs it started. A schedule of any
+ * other workflow is not looked at.
  *
  * Each firing is one transaction: lock the due schedule's row, start the run,
- * and move next_fire_at forward. They commit together, so a schedule is never
- * left due after its run started, or advanced without its run.
+ * and move next_fire_at forward (to null for a one-time schedule, which has no
+ * more ticks). They commit together, so a schedule is never left due after its
+ * run started, or advanced without its run. `prepare` supplies the run's code
+ * and concurrency group from the row's input.
  *
  * The lock is FOR UPDATE SKIP LOCKED, like claimStep's: an orchestrator that
  * finds the row locked by another doesn't wait for it, it moves on, and by the
  * time it looks again the row is no longer due. So a tick starts one run however
- * many orchestrators run. If that were ever wrong, the second insert would
- * break the unique (schedule_id, scheduled_for) on workflow_runs and fail
- * loudly; nothing here catches it.
+ * many orchestrators run, and an edit holding the row makes a firing skip it
+ * rather than wait. If that were ever wrong, the second insert would break the
+ * unique (schedule_id, scheduled_for) on workflow_runs and fail loudly; nothing
+ * here catches it.
  *
  * A schedule far behind (no orchestrator was running) fires once, for its old
  * tick, and resumes from the first tick after now: no backlog of runs. "Now" is
@@ -1149,41 +1273,32 @@ const MAX_FIRES_PER_CALL = 100;
  * and the run's and steps' locks that starting a run takes. Nothing holding a
  * run or group lock ever asks for a schedule row.
  */
-async function fireDueSchedules({ schedules }: { schedules: ScheduleToFire[] }): Promise<number> {
-  if (schedules.length === 0) return 0;
-
-  const saved = await db
-    .selectFrom("schedules")
-    .select(["workflow", "name"])
-    .where((eb) =>
-      eb.or(
-        schedules.map((schedule) =>
-          eb.and({ workflow: schedule.definition.name, name: schedule.name }),
-        ),
-      ),
-    )
-    .execute();
-  for (const { definition, name } of schedules) {
-    if (!saved.some((row) => row.workflow === definition.name && row.name === name)) {
-      throw new Error(
-        `Schedule ${definition.name}/${name} isn't saved: call sync() before running the orchestrator`,
-      );
-    }
-  }
+async function fireDueSchedules({
+  workflows,
+  prepare,
+}: {
+  workflows: WorkflowDefinition[];
+  prepare: (schedule: { workflow: string; name: string; input: unknown }) => ScheduledRun;
+}): Promise<number> {
+  if (workflows.length === 0) return 0;
+  const names = workflows.map((workflow) => workflow.name);
 
   let started = 0;
   for (let i = 0; i < MAX_FIRES_PER_CALL; i++) {
     const fired = await db.transaction().execute(async (trx) => {
       const due = await trx
         .selectFrom("schedules")
-        .select(["id", "workflow", "name", "cron", "next_fire_at", sql<Date>`now()`.as("now")])
-        .where((eb) =>
-          eb.or(
-            schedules.map((schedule) =>
-              eb.and({ workflow: schedule.definition.name, name: schedule.name }),
-            ),
-          ),
-        )
+        .select([
+          "id",
+          "workflow",
+          "name",
+          "cron",
+          "input",
+          "next_fire_at",
+          sql<Date>`now()`.as("now"),
+        ])
+        .where("workflow", "in", names)
+        .where("paused_at", "is", null)
         .where("next_fire_at", "<=", sql<Date>`now()`)
         .orderBy("next_fire_at")
         .orderBy("id")
@@ -1193,22 +1308,26 @@ async function fireDueSchedules({ schedules }: { schedules: ScheduleToFire[] }):
         .executeTakeFirst();
       if (!due) return false;
 
-      const { definition, input, concurrency } = schedules.find(
-        (schedule) => schedule.definition.name === due.workflow && schedule.name === due.name,
-      )!;
+      // Due rows have a next_fire_at: the query above compares it.
+      const scheduledFor = due.next_fire_at!;
+      const { definition, concurrency } = prepare({
+        workflow: due.workflow,
+        name: due.name,
+        input: due.input,
+      });
       await insertRun({
         trx,
         definition,
-        input,
+        input: due.input,
         concurrency,
-        schedule: { id: due.id, name: due.name, scheduledFor: due.next_fire_at },
+        schedule: { id: due.id, name: due.name, scheduledFor },
       });
 
-      const after = new Date(Math.max(due.next_fire_at.getTime(), due.now.getTime()));
+      const after = new Date(Math.max(scheduledFor.getTime(), due.now.getTime()));
       await trx
         .updateTable("schedules")
         .set({
-          next_fire_at: nextFireAfter({ cron: due.cron, after }),
+          next_fire_at: due.cron === null ? null : nextFireAfter({ cron: due.cron, after }),
           last_fired_at: due.now,
         })
         .where("id", "=", due.id)
@@ -1232,6 +1351,10 @@ export function createPostgresStore(): WorkflowStore {
     failStep,
     redriveRun,
     cancelRun,
+    createSchedule,
+    updateSchedule,
+    deleteSchedule,
+    setSchedulePaused,
     fireDueSchedules,
     close: () => db.destroy(),
   };

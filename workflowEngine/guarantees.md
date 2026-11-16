@@ -70,13 +70,30 @@ What the engine promises. Each guarantee is backed by a test in
   up. A run that fails or is redriven goes through the same admission. Counting
   the slots and admitting a run happen under one lock per key, so two runs can't
   take the same slot.
+- **Schedules are created and changed through the engine, and survive restarts
+  and `sync()`.** `engine.schedules` creates, updates, pauses, resumes and
+  deletes them. Each is a row in the database, not part of a workflow's
+  definition or version, so syncing or restarting never changes one.
 - **A schedule starts one run per tick, however many orchestrators are
   running.** An orchestrator locks the due schedule's row (skipping rows another
-  has locked), and the run and the move to the next tick commit together. A
-  unique constraint on the schedule and tick backs it: if the lock were ever
-  wrong, the second run would fail to insert rather than run twice.
+  has locked, such as one being edited), and the run and the move to the next
+  tick commit together. A unique constraint on the schedule and tick backs it:
+  if the lock were ever wrong, the second run would fail to insert rather than
+  run twice.
+- **A schedule fires once or repeats, never both.** A schedule with an `at`
+  starts one run at that moment and then has no next tick; it never fires
+  again. One with a `cron` repeats. An `at` in the past is rejected.
+- **A paused schedule skips its ticks.** It starts nothing while paused, and
+  resuming continues from the next tick after now, with no run for the ticks it
+  skipped. A one-time schedule has no other tick to skip to, so one paused
+  through its moment fires when it is resumed.
+- **A change to a schedule's cron takes effect from now.** The next tick is the
+  first one after the change; changing only the input keeps the next tick.
 - **Ticks missed while no orchestrator was running start one run,** for the
-  oldest missed tick, not one each. The schedule then resumes from now.
+  oldest missed tick, not one each. The schedule then resumes from now. A
+  one-time schedule missed this way fires once when an orchestrator returns.
+- **An orchestrator only fires schedules of its own workflows.** A schedule of
+  a workflow it doesn't have is left alone, without an error.
 - **A scheduled run is an ordinary run.** It goes through the same code as
   `startRun`, so concurrency groups, admission and events apply to it.
 - **A repeated key starts one run.** Starting a run with an idempotency key the
@@ -121,7 +138,10 @@ What the engine promises. Each guarantee is backed by a test in
   cancels it.
 - **Schedules only fire while an orchestrator is running.** Without one, nothing
   starts a scheduled run.
+- **Schedules aren't declared with the workflow,** so a new database has none
+  until something creates them.
 - **Schedule times are UTC and to the minute,** and a run starts up to
-  `sweepIntervalMs` after its minute.
+  `sweepIntervalMs` after its minute. A one-time schedule's `at` is used as
+  given.
 - **A tick starts a run even if the previous one is still going,** unless the
   workflow's `concurrency` prevents it.

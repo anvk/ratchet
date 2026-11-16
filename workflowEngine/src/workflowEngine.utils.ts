@@ -287,3 +287,8 @@ export function nextFireAfter({ cron: expression, after }: { cron: string; after
   }
   throw new Error(`Cron "${expression}" never fires`);
 }
+
+/** Throws if the expression doesn't parse or never fires. */
+export function assertCronFires(expression: string) {
+  nextFireAfter({ cron: expression, after: new Date() });
+}
