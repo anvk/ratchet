@@ -18,6 +18,7 @@ export async function listRuns({
   let query = db
     .selectFrom("workflow_runs as r")
     .innerJoin("workflows as w", "w.id", "r.workflow_id")
+    .leftJoin("schedules as s", "s.id", "r.schedule_id")
     .select((eb) => [
       "r.id",
       "w.name as workflow",
@@ -26,6 +27,8 @@ export async function listRuns({
       "r.created_at",
       "r.started_at",
       "r.finished_at",
+      "r.scheduled_for",
+      "s.name as schedule",
       // Formatted in SQL to keep the microseconds a JavaScript Date would
       // lose, which would otherwise make the cursor skip or repeat rows.
       sql<string>`to_char(r.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`.as(
@@ -86,6 +89,7 @@ export async function getRun(id: string) {
   const run = await db
     .selectFrom("workflow_runs as r")
     .innerJoin("workflows as w", "w.id", "r.workflow_id")
+    .leftJoin("schedules as s", "s.id", "r.schedule_id")
     .select([
       "r.id",
       "r.status",
@@ -94,6 +98,8 @@ export async function getRun(id: string) {
       "r.created_at",
       "r.started_at",
       "r.finished_at",
+      "r.scheduled_for",
+      "s.name as schedule",
       "w.name as workflow",
       "w.version as workflow_version",
     ])

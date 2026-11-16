@@ -72,6 +72,13 @@ export interface RunSummary {
   finished_at: string | null;
   steps_total: number;
   steps_done: number;
+  /**
+   * The name of the schedule that started the run. Null for a run started by a
+   * call, or if the schedule has since been removed.
+   */
+  schedule: string | null;
+  /** The time the schedule was due, for a run a schedule started. Null otherwise. */
+  scheduled_for: string | null;
 }
 
 /**
@@ -83,6 +90,24 @@ export interface RunsResponse {
   next_cursor: string | null;
   /** Runs of each status, across all pages. */
   counts: Record<WorkflowRunStatus, number>;
+}
+
+/** A schedule of a workflow, with when it next fires. */
+export interface ScheduleInfo {
+  /** The workflow's name. */
+  workflow: string;
+  workflow_title: string;
+  name: string;
+  /** Five fields, in UTC. */
+  cron: string;
+  next_fire_at: string;
+  /** Null until it has fired once. */
+  last_fired_at: string | null;
+}
+
+/** `GET /schedules`, ordered by workflow, then name. */
+export interface SchedulesResponse {
+  schedules: ScheduleInfo[];
 }
 
 /** A step of a run, with the title and description from the app's labels, or a title made from its name. */

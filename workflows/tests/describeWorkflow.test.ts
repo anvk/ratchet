@@ -59,3 +59,16 @@ test("a concurrency setting reaches the definition", () => {
   assert.equal(definition.concurrency?.key({ group: "a" }), "a");
   assert.equal(definition.concurrency?.key({}), null);
 });
+
+test("a schedule reaches the definition", () => {
+  const { definition } = describeWorkflow<{ name: string }>({
+    name: "scheduled",
+    title: "Run scheduled",
+    description: "Has a schedule.",
+    schedules: [{ name: "nightly", cron: "0 2 * * *", input: { name: "night" } }],
+    steps: [{ name: "only-step", title: "Only step", description: "Runs.", run: first }],
+  });
+  assert.deepEqual(definition.schedules, [
+    { name: "nightly", cron: "0 2 * * *", input: { name: "night" } },
+  ]);
+});
