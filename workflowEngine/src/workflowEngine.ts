@@ -17,6 +17,10 @@ import { runWorker } from "./workflowEngine.worker.ts";
 export function defineWorkflow<Input = unknown>(
   definition: WorkflowDefinition<Input>,
 ): WorkflowDefinition<Input> {
+  // The type already requires it; this is for callers that aren't type-checked.
+  if (typeof definition.version !== "string" || definition.version.trim() === "") {
+    throw new Error(`Workflow ${definition.name} needs a version`);
+  }
   if (definition.steps.length === 0) {
     throw new Error(`Workflow ${definition.name} has no steps`);
   }

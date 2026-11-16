@@ -168,7 +168,10 @@ export interface Step {
 export interface RunDetail {
   run: Omit<RunSummary, "steps_total" | "steps_done"> & {
     input: unknown;
+    /** The `version` the workflow's definition had when the run started. */
     workflow_version: string;
+    /** Identifies the exact plan the run started on. It changes when the steps do, even if the version doesn't. */
+    workflow_plan_hash: string;
     workflow_description: string | null;
   };
   steps: Step[];

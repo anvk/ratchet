@@ -46,26 +46,28 @@ async function emit({
     .execute();
 }
 
-const planVersions = new WeakMap<WorkflowDefinition, string>();
+const planHashes = new WeakMap<WorkflowDefinition, string>();
 
 /**
- * Hashes the parts of a workflow kept in the plan tables, so any edit creates a
- * new version. Remembered per definition, since workers ask on every claim.
+ * Hashes the parts of a workflow kept in the plan tables, and the `version` its
+ * author gave it, so an edit to either creates a new row in workflows.
+ * Remembered per definition, since workers ask on every claim.
  */
-function planVersion(definition: WorkflowDefinition): string {
-  let version = planVersions.get(definition);
-  if (!version) {
-    version = hashPlan(definition);
-    planVersions.set(definition, version);
+function planHash(definition: WorkflowDefinition): string {
+  let hash = planHashes.get(definition);
+  if (!hash) {
+    hash = hashPlan(definition);
+    planHashes.set(definition, hash);
   }
-  return version;
+  return hash;
 }
 
-/** The hash behind planVersion. */
+/** The hash behind planHash. */
 function hashPlan(definition: WorkflowDefinition): string {
   const links = resolveNeeds(definition.steps);
   const plan = {
     name: definition.name,
+    version: definition.version,
     steps: definition.steps.map(({ name, leaseMs, maxAttempts, backoffMs }, i) => ({
       name,
       needs: links[i].needs,
@@ -85,9 +87,10 @@ async function syncWorkflows(workflows: WorkflowDefinition[]) {
         .insertInto("workflows")
         .values({
           name: definition.name,
-          version: planVersion(definition),
+          version: definition.version,
+          plan_hash: planHash(definition),
         })
-        .onConflict((oc) => oc.columns(["name", "version"]).doNothing())
+        .onConflict((oc) => oc.columns(["name", "plan_hash"]).doNothing())
         .returning("id")
         .executeTakeFirst();
       if (!created) return;
@@ -228,7 +231,7 @@ async function insertRun({
     .selectFrom("workflows")
     .select("id")
     .where("name", "=", definition.name)
-    .where("version", "=", planVersion(definition))
+    .where("plan_hash", "=", planHash(definition))
     .executeTakeFirstOrThrow();
 
   const steps = await trx
@@ -246,6 +249,7 @@ async function insertRun({
     .insertInto("workflow_runs")
     .values({
       workflow_id: workflow.id,
+      workflow_version: definition.version,
       input: JSON.stringify(input),
       idempotency_key: idempotencyKey ?? null,
       concurrency_key: concurrency?.key ?? null,
@@ -439,9 +443,9 @@ async function claimStep({
       .where("sr.status", "=", "ready")
       // A step waiting to retry is ready, but not until its backoff is over.
       .where("sr.ready_at", "<=", sql<Date>`now()`)
-      // The version is a hash that includes the name, so it picks out one
-      // workflow version: a worker never runs a step it has different code for.
-      .where("w.version", "in", workflows.map(planVersion));
+      // The hash includes the name, so it picks out one version of one
+      // workflow: a worker never runs a step it has different code for.
+      .where("w.plan_hash", "in", workflows.map(planHash));
     if (order === "oldest-run-first") query = query.orderBy("r.created_at").orderBy("r.id");
     const next = await query
       .orderBy("sr.ready_at")

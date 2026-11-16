@@ -140,6 +140,7 @@ test("an engine rejects two workflows with the same name", () => {
 test("workers only claim steps from workflows they know", async () => {
   const foreign = defineWorkflow({
     name: "foreign",
+    version: "1",
     steps: [{ name: "only", run: async () => null }],
   });
   await store.syncWorkflows([foreign]);
@@ -196,6 +197,7 @@ test("editing a workflow leaves earlier runs on the version they started with", 
   const version = (leaseMs: number) =>
     defineWorkflow({
       name: "versioned",
+      version: "1",
       steps: [{ name: "only", leaseMs, run: async () => null }],
     });
   /** The lease in the plan for a run's only step. */
@@ -244,4 +246,55 @@ test("engine.startRun starts a run by workflow name, and rejects a name it doesn
     .select((eb) => eb.fn.countAll<string>().as("count"))
     .executeTakeFirstOrThrow();
   assert.equal(after, before, "an unknown name creates no run");
+});
+
+test("changing only a workflow's version makes a new version, which workers with the old one leave alone", async () => {
+  // Same plan, new version: like a deploy that changed what a step's code does.
+  const bumped = { ...pipeline, version: "2" };
+  await store.syncWorkflows([bumped]);
+  const versions = await db
+    .selectFrom("workflows")
+    .select(["version", "plan_hash"])
+    .where("name", "=", pipeline.name)
+    .execute();
+  assert.equal(new Set(versions.map((v) => v.plan_hash)).size, versions.length);
+  assert.ok(versions.some((v) => v.version === "2"));
+  const runId = await store.startRun({ definition: bumped });
+  const started = await db
+    .selectFrom("workflow_runs")
+    .select("workflow_version")
+    .where("id", "=", runId)
+    .executeTakeFirstOrThrow();
+  assert.equal(started.workflow_version, "2", "a run records the version it started on");
+
+  // The running workers have version "1", so they leave it alone.
+  await sleep(300);
+  const run = await db
+    .selectFrom("workflow_runs")
+    .select("status")
+    .where("id", "=", runId)
+    .executeTakeFirstOrThrow();
+  assert.equal(run.status, "queued");
+
+  const claim = await store.claimStep({
+    workerId: "newer-deploy",
+    workflows: [bumped],
+    order: "fair",
+    defaults: { ...DEFAULT_ENGINE_SETTINGS, leaseMs: 30_000 },
+  });
+  assert.equal(claim?.runId, runId);
+  await db.deleteFrom("workflow_runs").where("id", "=", runId).execute();
+});
+
+test("defineWorkflow rejects a workflow without a version", () => {
+  const define = (version: unknown) =>
+    defineWorkflow({
+      name: "unversioned",
+      version: version as string,
+      steps: [{ name: "only", run: async () => null }],
+    });
+  for (const version of [undefined, "", "  ", 2]) {
+    assert.throws(() => define(version), /Workflow unversioned needs a version/);
+  }
+  assert.doesNotThrow(() => define("2"));
 });

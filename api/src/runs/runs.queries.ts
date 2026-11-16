@@ -101,7 +101,8 @@ export async function getRun(id: string) {
       "r.scheduled_for",
       "s.name as schedule",
       "w.name as workflow",
-      "w.version as workflow_version",
+      "r.workflow_version",
+      "w.plan_hash as workflow_plan_hash",
     ])
     .where("r.id", "=", id)
     .executeTakeFirst();

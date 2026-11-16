@@ -106,6 +106,7 @@ test("defineWorkflow only lets a step need steps listed before it", () => {
   const needing = (needs: string[]) =>
     defineWorkflow({
       name: "bad",
+      version: "1",
       steps: [
         { name: "a", run: async () => null },
         { name: "b", needs, run: async () => null },

@@ -7,6 +7,7 @@ const second = async () => ({ ok: false });
 
 const { definition, labels } = describeWorkflow<{ name: string }>({
   name: "demo",
+  version: "1",
   title: "Run a demo",
   description: "Shows the labels.",
   steps: [
@@ -50,6 +51,7 @@ test("the definition has no title or description, on the workflow or any step", 
 test("a concurrency setting reaches the definition", () => {
   const { definition } = describeWorkflow<{ group?: string }>({
     name: "grouped",
+    version: "1",
     title: "Run grouped",
     description: "Has a concurrency group.",
     concurrency: { key: (input) => input.group ?? null, limit: 2 },

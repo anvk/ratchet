@@ -374,7 +374,12 @@ test("two runs can't be recorded for one tick", async () => {
   await assert.rejects(
     db
       .insertInto("workflow_runs")
-      .values({ workflow_id, schedule_id: run.schedule_id, scheduled_for: dueAt })
+      .values({
+        workflow_id,
+        workflow_version: "1",
+        schedule_id: run.schedule_id,
+        scheduled_for: dueAt,
+      })
       .execute(),
     (err: { code?: string }) => err.code === "23505",
   );

@@ -37,6 +37,7 @@ You describe a workflow with `defineWorkflow` (`workflows/payment/workflow.ts`):
 ```ts
 defineWorkflow({
   name: "payment",
+  version: "1",
   steps: [
     { name: "receive-payment", run: (ctx) => receivePayment(...) },
     { name: "validate-account", run: (ctx) => validateAccount({
@@ -87,7 +88,7 @@ The schema (`workflowEngine/src/stores/postgres/schema.sql`) has two groups of t
 |                                       | `step_runs`     | Progress of each step in that run, with its `needs` copied from the plan: **this is the to-do list workers pick from**. A running step also has `lease_expires_at` |
 |                                       | `events`        | A diary of everything that happened, never edited                                                                                                                  |
 
-On startup, the API calls `engine.sync()`, which copies each workflow's plan into `workflows` and `steps`. The orchestrator's process calls it too before it starts its loop, because it starts runs as well (section 15). If you edit a workflow, say by renaming a step or changing what it needs, its lease or its retries, it gets a **new version row**. Old runs keep pointing at the version they started with, so the dashboard still shows them correctly.
+On startup, the API calls `engine.sync()`, which copies each workflow's plan into `workflows` and `steps`. The orchestrator's process calls it too before it starts its loop, because it starts runs as well (section 15). If you edit a workflow, say by renaming a step or changing what it needs, its lease or its retries, it gets a **new version row**. The engine can't see inside a step's `run`, so every workflow also has a **`version`** of its own, any text you choose, and changing that makes a new version row too. Change it when you edit a step's code in a way that runs already in progress couldn't carry on with. The row keeps both: your `version`, and a `plan_hash` of the version and the steps together, which is what tells two rows apart. Every run also copies the version it started on into its own `workflow_version` column, so you can see it on the run without looking anything up. Old runs keep pointing at the version they started with, so the dashboard still shows them correctly.
 
 **Workers only claim runs of a version they have.** During a deploy, old and new workers run side by side. Without this, an old worker could pick up a step of a run started on the new version, and run it with old code against a new plan. Each worker knows the versions of its own workflows, and the claim query (section 6) only matches those, so old workers finish old runs and new workers take new ones.
 
@@ -375,6 +376,7 @@ Each run did everything right. The run lock (section 10) can't help, because it 
 ```ts
 defineWorkflow({
   name: "payment",
+  version: "1",
   concurrency: { key: (input) => (input.account ? `account:${input.account}` : null), limit: 1 },
   steps: [...],
 });
@@ -636,11 +638,10 @@ interface WorkflowStore {
 
 - **A retry repeats whatever the failed attempt already did,** unless the step makes it safe to repeat (section 12). The engine can't do that for you.
 - **A failed run takes as long as its slowest independent step.** Steps that don't depend on the failed one finish first, so the caller hears "failed" later than it could.
-- **A version covers the plan, not the code.** Changing a step's name, needs, lease or retries makes a new version; changing only the code inside `run` doesn't, so old and new workers both claim the same runs.
+- **The engine can't tell when a step's code changes.** If you edit the code inside `run` and leave the workflow's `version` as it was, old and new workers both claim the same runs.
 - **Lost leases need the orchestrator:** if it isn't running, steps whose worker went silent stay `running`.
 - **A run that never finishes keeps its slot.** A run whose steps no worker can claim, say because no worker has its version, stays in progress, and every run waiting behind it in its group waits too, until someone cancels it.
 - **A timed-out step isn't stopped.** The worker stops waiting for it, but unless the step honours `ctx.signal` its function keeps running in the background, and may overlap with its own retry.
 - **A cancelled step isn't stopped either.** Its worker hears at its next heartbeat, up to a third of the lease later, and the step's function only stops if it honours `ctx.signal`.
-- **Schedules need the orchestrator too.** While none is running, nothing fires; when one starts again, each schedule that missed ticks starts one run, not one for each.
 
-All eight are listed in `workflowEngine/guarantees.md`.
+All seven are listed in `workflowEngine/guarantees.md`.

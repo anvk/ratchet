@@ -22,6 +22,7 @@ async function engineWithRunningStep(settings?: Partial<WorkflowEngineSettings>)
 
   const slow = defineWorkflow({
     name: "slow",
+    version: "1",
     steps: [
       {
         name: "slow",

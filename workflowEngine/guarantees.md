@@ -9,6 +9,14 @@ What the engine promises. Each guarantee is backed by a test in
   workflow version it started on, and workers only claim runs of versions they
   have. During a deploy, old workers finish old runs and new workers take new
   ones.
+- **A workflow gets a new version when its plan or its `version` changes.** The
+  plan is its steps' names, needs, leases and retries. `version` is text every
+  workflow must give, for the changes the engine can't see: changing it when a
+  step's code changes keeps workers with the old code and the new from sharing
+  a run.
+- **A run records the version it started on.** Its `workflow_version` is the
+  definition's `version` at that moment and never changes, whatever is
+  deployed later. That goes for runs a schedule starts too.
 - **A step whose worker disappears runs again.** Each claim comes with a lease,
   which the worker renews with heartbeats while the step runs. When a lease
   expires (the worker crashed, froze or lost its connection), the orchestrator
@@ -134,9 +142,10 @@ What the engine promises. Each guarantee is backed by a test in
   `ctx.signal` it keeps running until it returns, and its result is discarded.
 - **A failed run ends only when its last running step does,** since steps
   that don't depend on the failure finish first.
-- **A version covers the plan, not the code.** Editing only the code inside a
-  step's `run` doesn't create a new version, so workers with either code
-  claim the same runs.
+- **The engine can't tell when a step's code changes.** A workflow gets a new
+  version when its plan or its `version` changes. If you edit the code inside
+  a step's `run` and leave `version` as it was, workers with either code claim
+  the same runs.
 - **Lost leases are only recovered while an orchestrator is running.** Without
   one, steps whose lease expired stay `running`.
 - **A step that blocks the event loop for longer than its lease loses it,**

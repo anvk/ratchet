@@ -11,6 +11,7 @@ export interface GreetingInput {
 
 export default describeWorkflow<GreetingInput>({
   name: "greeting",
+  version: "1",
   title: "Send a greeting",
   description: "A three-step example showing how little a new workflow needs.",
   steps: [

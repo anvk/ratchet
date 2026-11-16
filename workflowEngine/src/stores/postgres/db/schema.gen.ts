@@ -100,12 +100,14 @@ export interface WorkflowRuns {
   started_at: Timestamp | null;
   status: Generated<WorkflowRunStatus>;
   workflow_id: string;
+  workflow_version: string;
 }
 
 export interface Workflows {
   created_at: Generated<Timestamp>;
   id: Generated<string>;
   name: string;
+  plan_hash: string;
   version: string;
 }
 

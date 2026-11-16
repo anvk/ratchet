@@ -16,6 +16,7 @@ after(() => stopWorkers());
 /** Two steps no worker has code for, so a run of it stays queued. */
 const unclaimed = defineWorkflow({
   name: "cancel-unclaimed",
+  version: "1",
   steps: [
     { name: "one", run: async () => null },
     { name: "two", run: async () => null },

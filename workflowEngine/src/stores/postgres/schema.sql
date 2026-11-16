@@ -32,9 +32,14 @@ CREATE TYPE failure_reason AS ENUM (
 CREATE TABLE workflows (
   id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   name        text NOT NULL,
-  version     text NOT NULL, -- hash of the definition
+  -- The `version` its author gave the definition, such as "2".
+  version     text NOT NULL,
+  -- Hash of the name, that version and the steps. This, not version, is what
+  -- tells two versions apart: an edit to the steps changes it even when the
+  -- author's version stays the same.
+  plan_hash   text NOT NULL,
   created_at  timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (name, version)
+  UNIQUE (name, plan_hash)
 );
 
 CREATE TABLE steps (
@@ -86,6 +91,9 @@ CREATE INDEX schedules_due_idx ON schedules (next_fire_at) WHERE paused_at IS NU
 CREATE TABLE workflow_runs (
   id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   workflow_id uuid NOT NULL REFERENCES workflows (id),
+  -- The workflow's version when the run started, copied from workflows so it
+  -- can be read here without a join. A run never changes version.
+  workflow_version text NOT NULL,
   status      workflow_run_status NOT NULL DEFAULT 'queued',
   input       jsonb NOT NULL DEFAULT '{}',
   -- Set by the caller. Starting a run with a key already used returns that run.

@@ -84,6 +84,15 @@ export interface WorkflowConcurrency<Input = any> {
 export interface WorkflowDefinition<Input = any> {
   /** Stable identifier, unique within the registry. */
   name: string;
+  /**
+   * Any text you choose, such as "1". Changing it makes a new version of the
+   * workflow, as changing its steps does, so workers with the old code and
+   * workers with the new never share a run. The engine can't see inside `run`,
+   * so change it when you edit a step's code in a way that runs already in
+   * progress couldn't carry on with, such as a different output. Leave it alone
+   * for a fix those runs can pick up.
+   */
+  version: string;
   /** Keeps runs that share a key from overlapping. Runs are not limited by default. */
   concurrency?: WorkflowConcurrency<Input>;
   /** Each step is listed after the steps it needs. */
@@ -156,7 +165,10 @@ export interface ScheduledRun {
  * together or not at all.
  */
 export interface WorkflowStore {
-  /** Saves each workflow's plan. Safe to repeat, and an edit creates a new version. */
+  /**
+   * Saves each workflow's plan. Safe to repeat. An edit to the plan, or to the
+   * definition's `version`, creates a new version.
+   */
   syncWorkflows(workflows: WorkflowDefinition[]): Promise<void>;
   /**
    * Creates a run with its starting steps (those that need nothing) ready to
