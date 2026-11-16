@@ -68,7 +68,7 @@ And it can set its **retry policy** (section 11): **`maxAttempts`**, how many ti
 
 And a **time limit**: **`timeoutMs`**, how long one attempt may run before the worker gives up on it (section 11). `screen-sanctions` sets 6 seconds. Steps that don't set one have no limit.
 
-The workflow as a whole can set **`concurrency`**: runs that share a key, such as payments from one account, don't overlap (section 13). It can also set **`schedules`**, to be started by the clock instead of by a call (section 16).
+The workflow as a whole can set **`concurrency`**: runs that share a key, such as payments from one account, don't overlap (section 13).
 
 The engine knows nothing about payments. It only knows "named functions and what each one needs".
 
@@ -82,12 +82,12 @@ The schema (`workflowEngine/src/stores/postgres/schema.sql`) has two groups of t
 | ------------------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **The plan** (the recipe)             | `workflows`     | One row per version of a workflow                                                                                                                                  |
 |                                       | `steps`         | The steps in each version, with each step's `needs`, `lease_ms`, `max_attempts` and `backoff_ms`                                                                   |
-|                                       | `schedules`     | One row per schedule of a workflow, with when it next fires (section 16)                                                                                           |
+|                                       | `schedules`     | One row per schedule: a workflow to start, when, and with what input (section 16)                                                                                  |
 | **The execution** (tonight's cooking) | `workflow_runs` | One row each time someone starts a workflow, with its concurrency group and when it was admitted (section 13)                                                      |
 |                                       | `step_runs`     | Progress of each step in that run, with its `needs` copied from the plan: **this is the to-do list workers pick from**. A running step also has `lease_expires_at` |
 |                                       | `events`        | A diary of everything that happened, never edited                                                                                                                  |
 
-On startup, the API calls `engine.sync()`, which copies each workflow's plan into `workflows` and `steps`, and its schedules into `schedules`. The orchestrator's process calls it too before it starts its loop, because it starts runs as well (section 16). If you edit a workflow, say by renaming a step or changing what it needs, its lease or its retries, it gets a **new version row**. Old runs keep pointing at the version they started with, so the dashboard still shows them correctly.
+On startup, the API calls `engine.sync()`, which copies each workflow's plan into `workflows` and `steps`. The orchestrator's process calls it too before it starts its loop, because it starts runs as well (section 16). If you edit a workflow, say by renaming a step or changing what it needs, its lease or its retries, it gets a **new version row**. Old runs keep pointing at the version they started with, so the dashboard still shows them correctly.
 
 **Workers only claim runs of a version they have.** During a deploy, old and new workers run side by side. Without this, an old worker could pick up a step of a run started on the new version, and run it with old code against a new plan. Each worker knows the versions of its own workflows, and the claim query (section 6) only matches those, so old workers finish old runs and new workers take new ones.
 
@@ -486,23 +486,57 @@ Neither can move, and neither is doing anything wrong. They arrived in the same 
 
 ## 16. Schedules: starting runs by the clock
 
-A run can start because something calls `startRun`, or because the clock says it's time. A workflow asks for the second with `schedules`:
+A run can start because something calls `startRun`, or because the clock says it's time. For the second you create a **schedule**:
 
 ```ts
-defineWorkflow({
-  name: "greeting",
-  schedules: [{ name: "every-minute", cron: "* * * * *", input: { name: "the scheduler" } }],
-  steps: [...],
+await engine.schedules.create({
+  workflow: "greeting",
+  name: "every-minute",
+  cron: "* * * * *",
+  input: { name: "the scheduler" },
 });
 ```
 
-A schedule has a **name**, a **cron expression** and the **input** its runs start with. The expression is the usual five fields, minute, hour, day of month, month and day of week, read in **UTC**: `0 2 * * *` is two o'clock every night, `*/15 * * * *` every quarter of an hour, `0 9 * * 1-5` nine o'clock on weekdays. Each field takes `*`, a number, a range (`1-5`), a step (`*/15`) or a list of those. `defineWorkflow` rejects an expression it can't read, or one that never comes round, such as the 31st of February.
+A schedule belongs to a workflow and has a **name**, the **input** its runs start with, and a time. A workflow can have any number of them, each with its own input.
+
+**It repeats, or it fires once.** A repeating schedule has a **cron expression**. It's the usual five fields, minute, hour, day of month, month and day of week, read in **UTC**: `0 2 * * *` is two o'clock every night, `*/15 * * * *` every quarter of an hour, `0 9 * * 1-5` nine o'clock on weekdays. Each field takes `*`, a number, a range (`1-5`), a step (`*/15`) or a list of those. An expression that can't be read, or one that never comes round, such as the 31st of February, is rejected.
 
 One rule of cron surprises people. When both day fields are set, a day matches if **either** does: `0 0 13 * 5` is every Friday and every 13th, not only a Friday the 13th.
 
-Like the concurrency limit, a schedule isn't part of the workflow's version (section 3), so changing one doesn't strand any runs.
+A one-time schedule has a moment, `at`, in place of the expression:
 
-**Who starts the run?** The orchestrator (section 8). `engine.sync()` saves each schedule as a row in `schedules`, with the time it's next due, `next_fire_at`. On each of its rounds, a second apart, the orchestrator looks for rows whose time has come and starts a run for each.
+```ts
+await engine.schedules.create({
+  workflow: "greeting",
+  name: "launch-day",
+  at: new Date("2027-03-01T09:00:00Z"),
+  input: { name: "everyone" },
+});
+```
+
+It starts one run at that moment and never another. Its row stays afterwards, with nothing left to fire, so you can see that it ran. A moment that has already passed is rejected: to start a run now, call `startRun`. A schedule keeps its kind, so turning one into the other means deleting it and creating it again.
+
+**A schedule is a row, not part of the workflow.** A step's `needs` belong in the code, because the code is what they describe. When a workflow runs, and with what input, is something you want to change while everything is running: add a report for a new customer, hold one back during an incident. So a schedule lives in the `schedules` table and nowhere else, and it is created and changed through the engine:
+
+| Call                      | What it does                                          | Returns `false` when                                            |
+| ------------------------- | ----------------------------------------------------- | --------------------------------------------------------------- |
+| `engine.schedules.create` | Saves a schedule, due at its next tick or at its `at` | the workflow already has a schedule with that name              |
+| `engine.schedules.update` | Changes the cron, the `at` or the input               | there's no such schedule, or it's a one-time one that has fired |
+| `engine.schedules.pause`  | Stops it firing                                       | there's no such schedule, or it's already paused                |
+| `engine.schedules.resume` | Lets it fire again                                    | there's no such schedule, or it isn't paused                    |
+| `engine.schedules.delete` | Removes it. The runs it started stay, and keep its id | there's no such schedule                                        |
+
+`false` means the call didn't apply and nothing changed, as with `cancelRun`. A request that could never be right throws instead: a workflow the engine doesn't have, a cron that can't be read, both a `cron` and an `at`.
+
+Because it's a row, a schedule survives restarts and `engine.sync()`, which only saves plans (section 3). It also means a new database has no schedules until something creates them. Creating the same schedule at every startup is safe: the second time, the name is taken and the call returns `false`.
+
+A schedule belongs to a workflow by name, not to one version of it. Its runs start on whichever version the orchestrator that fires it has.
+
+**Changing one.** A new cron takes effect from now: the next run is at the new expression's first tick after the change. Changing only the input leaves the next tick where it was, and the next run starts with the new input.
+
+**Pausing.** A paused schedule starts nothing. When a repeating schedule is resumed, it carries on from the first tick after that moment, and the ticks that passed while it was paused start no runs: pausing it meant those runs weren't wanted. A one-time schedule has only one tick, so if its moment passed while it was paused, it fires when it's resumed.
+
+**Who starts the run?** The orchestrator (section 8). Each row holds the time it's next due, `next_fire_at`. On each of its rounds, a second apart, the orchestrator looks for rows that are due and not paused, among the schedules of the workflows it has, and starts a run for each. A schedule of a workflow it doesn't have is left alone: it may belong to another engine using the same database.
 
 **The hard part is two orchestrators.** Running more than one is allowed, and it's what happens for a moment in every deploy. If each one looks at the clock, sees that it's two o'clock and starts the nightly run, the workflow runs twice:
 
@@ -515,15 +549,15 @@ This is the claiming problem from section 6 again, with a schedule in place of a
 
 ```sql
 SELECT ... FROM schedules
-WHERE next_fire_at <= now()
+WHERE next_fire_at <= now() AND paused_at IS NULL
 ORDER BY next_fire_at
 LIMIT 1
 FOR UPDATE SKIP LOCKED;
 ```
 
-1. lock a due schedule's row, skipping any row another orchestrator has locked;
-2. insert the run, exactly as `startRun` would (section 4);
-3. move the row's `next_fire_at` on to the schedule's next tick.
+1. lock a due schedule's row, skipping any row that's locked;
+2. insert the run with the row's input, exactly as `startRun` would (section 4);
+3. move the row's `next_fire_at` on to the schedule's next tick, or clear it for a one-time schedule.
 
 ```
 orchestrator-1: locks "nightly". Starts the run. Sets next_fire_at to tomorrow. Commits.
@@ -532,19 +566,21 @@ orchestrator-2: "nightly" is locked → skips it. Looks again a second later: it
 
 Because the run and the new `next_fire_at` are saved together, there's no moment at which the run exists but the schedule still looks due, or the schedule has moved on but the run was never created.
 
+An update or a resume locks the same row, so an edit and a firing take turns: the firing skips a row that's being edited and finds it again on its next round.
+
+**The store asks the engine about the run.** A schedule's input is only known once its row is read, and the store has rows but not your code. So the engine hands `fireDueSchedules` a function, `prepare`: given a due schedule's workflow and input, it returns the workflow's definition and the concurrency group that input falls in (section 13). If your `key` function throws for a schedule's input, that round of firing fails with the error, and fails again every round until the schedule's input is fixed or the schedule is deleted.
+
 **A second line that fails out loud.** Every run a schedule starts records which schedule it was and which tick it was for (`schedule_id` and `scheduled_for`), and the database refuses two runs with the same pair. The lock is what keeps a schedule from firing twice. The rule in the database is there so that a mistake in the locking shows up as an error instead of as a workflow that quietly ran twice. It's also why schedules don't use a run idempotency key (section 12): a repeated key returns the first run without complaint, which would hide exactly this mistake.
 
-**Missed ticks start one run.** If no orchestrator was running for three hours, an every-minute schedule has missed 180 ticks. Starting 180 runs at once would help nobody. The first orchestrator back starts **one** run, for the oldest tick that was missed, and sets `next_fire_at` to the first tick after now.
+`schedule_id` is a plain id, not a foreign key. With a foreign key, deleting a schedule would have to update every run it ever started, and so lock them. Without one, every schedule operation touches the schedule's row and nothing else.
+
+**Missed ticks start one run.** If no orchestrator was running for three hours, an every-minute schedule has missed 180 ticks. Starting 180 runs at once would help nobody. The first orchestrator back starts **one** run, for the oldest tick that was missed, and sets `next_fire_at` to the first tick after now. A one-time schedule whose moment was missed this way fires when an orchestrator is back. This is different from pausing, which starts no run for the ticks it skipped: nobody chose for the orchestrator to be down.
 
 **A scheduled run is an ordinary run.** It's created by the same code as any other, so it waits its turn in a concurrency group (section 13), can be cancelled (section 14) and writes the same events. The only differences are the two columns above, and its `run_queued` event, which names the schedule.
 
 That also answers what happens when a run takes longer than the gap between ticks: the next tick starts another run alongside it. A workflow that mustn't overlap with itself says so with `concurrency`, and its scheduled runs then queue like any others.
 
-**Where the lock fits.** A schedule's row is locked before anything else, and the run is then started under it in the usual way (section 13). Nothing that holds a run or a group ever needs a schedule, so this lock can't be part of a circle (section 15).
-
-**A schedule nobody saved is an error.** The orchestrator only fires schedules its own code declares, and it expects each to have a row. If one doesn't, because `sync()` was never called, its round fails with an error naming that schedule, every second, until it's fixed. A schedule that silently never fired would be much harder to notice. That's why an orchestrator's process calls `engine.sync()` before `engine.runOrchestrator()`; the loop doesn't do it for you.
-
-**Changing and removing schedules.** `sync()` leaves an unchanged schedule's row alone, so restarting a process never loses a tick that's about to fire. A schedule whose expression changed is rescheduled from now. One that's no longer declared is deleted, and the runs it started stay.
+**Where the lock fits.** When a schedule fires, its row is locked before anything else, and the run is then started under it in the usual way (section 13). Nothing that holds a run or a group ever needs a schedule, so this lock can't be part of a circle (section 15).
 
 ---
 
@@ -582,11 +618,13 @@ interface WorkflowStore {
   claimStep(...)      completeStep(...)   failStep(...)
   extendLease(...)    sweepExpiredLeases()
   redriveRun(...)     cancelRun(...)
-  fireDueSchedules(...)                   close()
+  createSchedule(...) updateSchedule(...) deleteSchedule(...)
+  setSchedulePaused(...)                  fireDueSchedules(...)
+  close()
 }
 ```
 
-`createPostgresStore()` is one implementation of it. You could write a file-based or SQLite store with the same eleven methods, and the engine and workers wouldn't change.
+`createPostgresStore()` is one implementation of it. You could write a file-based or SQLite store with the same fifteen methods, and the engine and workers wouldn't change.
 
 `failStep` decides between a retry and a final failure in one transaction, using the step's retry policy from the plan. The run lock (section 10) and the group lock (section 13) are the store's business too: the interface only promises that two steps finishing at once ready a step that needs both exactly once, and that a group never has more than its limit in progress, and each store keeps those promises its own way. Leases are part of the same interface on purpose: the ownership check has to happen in the same transaction that saves a step's result, so leases must live wherever step state lives.
 

@@ -106,22 +106,6 @@ export default defineWorkflow<StockReportInput>({
 });
 ```
 
-### Run it on a schedule
-
-`schedules` starts runs by the clock. Each has a name, a five-field cron
-expression in UTC, and the input its runs start with. The orchestrator starts
-one run per tick, however many orchestrators are running:
-
-```ts
-export default defineWorkflow<StockReportInput>({
-  name: "stock-report",
-  schedules: [{ name: "nightly", cron: "0 2 * * *", input: { ticker: "AAPL" } }], // 02:00 UTC
-  steps: [
-    // ...as above
-  ],
-});
-```
-
 ### Create the engine
 
 An engine pairs your workflows with a store, which keeps their state in
@@ -141,13 +125,52 @@ export const engine = createWorkflowEngine({
 });
 ```
 
+### Run it on a schedule
+
+A schedule starts runs by the clock. It is a row in the database, created and
+changed through the engine while everything is running. Each has a name, the
+input its runs start with, and either a five-field cron expression in UTC or
+one moment to fire at:
+
+```ts
+// Every night at 02:00 UTC.
+await engine.schedules.create({
+  workflow: "stock-report",
+  name: "aapl-nightly",
+  cron: "0 2 * * *",
+  input: { ticker: "AAPL" },
+});
+
+// Once.
+await engine.schedules.create({
+  workflow: "stock-report",
+  name: "launch-day",
+  at: new Date("2027-03-01T09:00:00Z"),
+  input: { ticker: "AAPL" },
+});
+
+await engine.schedules.update({
+  workflow: "stock-report",
+  name: "aapl-nightly",
+  cron: "0 3 * * *",
+});
+await engine.schedules.pause({ workflow: "stock-report", name: "aapl-nightly" });
+await engine.schedules.resume({ workflow: "stock-report", name: "aapl-nightly" });
+await engine.schedules.delete({ workflow: "stock-report", name: "aapl-nightly" });
+```
+
+Each call returns `false` when it doesn't apply, such as creating a name the
+workflow already has, so creating a schedule at every startup is safe. A
+paused schedule skips its ticks. The orchestrator starts one run per tick,
+however many orchestrators are running.
+
 ### Run three kinds of process
 
 They only share the database, so each can run as its own process, container
 or pod.
 
 **Whatever starts runs**, such as your API. `sync()` saves each workflow's
-plan and schedules, which starting a run needs; call it once at startup. `startRun` only records
+plan, which starting a run needs; call it once at startup. `startRun` only records
 the run and returns its id. Workers do the work.
 
 ```ts

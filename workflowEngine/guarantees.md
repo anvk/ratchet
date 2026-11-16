@@ -138,8 +138,8 @@ What the engine promises. Each guarantee is backed by a test in
   cancels it.
 - **Schedules only fire while an orchestrator is running.** Without one, nothing
   starts a scheduled run.
-- **Schedules aren't declared with the workflow,** so a new database has none
-  until something creates them.
+- **A new database has no schedules.** They live only in the database, so
+  something has to create them.
 - **Schedule times are UTC and to the minute,** and a run starts up to
   `sweepIntervalMs` after its minute. A one-time schedule's `at` is used as
   given.
