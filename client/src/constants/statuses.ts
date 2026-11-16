@@ -10,6 +10,7 @@ export const RUN_STATUS_LABELS: Record<WorkflowRunStatus, string> = {
   running: "Running",
   succeeded: "Passed",
   failed: "Failed",
+  cancelled: "Cancelled",
 };
 
 /**
@@ -35,6 +36,7 @@ export const FAILURE_REASON_LABELS: Record<FailureReason, string> = {
   attempts_exhausted: "Out of attempts",
   lost_worker: "Kept losing its worker",
   unknown_step: "No worker knows this step",
+  cancelled: "Cancelled",
 };
 
 /** Pill colours for run statuses. */
@@ -43,6 +45,7 @@ export const RUN_STATUS_TONES: Record<WorkflowRunStatus, PillTone> = {
   running: "blue",
   succeeded: "green",
   failed: "red",
+  cancelled: "grey",
 };
 
 /** Pill colours for step statuses, matching the step cards on the diagram. */

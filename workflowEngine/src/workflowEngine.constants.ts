@@ -17,17 +17,22 @@ const workflowRunStatuses: Record<WorkflowRunStatus, true> = {
   running: true,
   succeeded: true,
   failed: true,
+  cancelled: true,
 };
 
 export const WORKFLOW_RUN_STATUSES = Object.keys(workflowRunStatuses) as WorkflowRunStatus[];
 
-/** Statuses a run never leaves, unless a failed run is redriven. */
-export const FINISHED_RUN_STATUSES: readonly WorkflowRunStatus[] = ["succeeded", "failed"];
+/** Statuses a run only leaves if it is redriven. */
+export const FINISHED_RUN_STATUSES: readonly WorkflowRunStatus[] = [
+  "succeeded",
+  "failed",
+  "cancelled",
+];
 
 /**
  * Failures worth resuming once the cause is fixed: a service that was down, a
- * worker that kept crashing, a step no worker had code for. Not non_retryable:
- * asking again won't change a decision.
+ * worker that kept crashing, a step no worker had code for. Not
+ * non_retryable: asking again won't change a decision.
  */
 export const REDRIVABLE_FAILURE_REASONS: readonly FailureReason[] = [
   "attempts_exhausted",

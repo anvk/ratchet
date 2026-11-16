@@ -222,4 +222,42 @@ export const stalling = defineWorkflow<StallingInput>({
   ],
 });
 
-export const workflows = [pipeline, slow, flaky, doomed, diamond, exclusive, paired, stalling];
+interface CancellableInput {
+  /** How long the step takes when it ignores the signal. */
+  ms?: number;
+  /** Wait for ctx.signal instead (or 10 seconds), so only a cancel releases the worker early. */
+  untilSignal?: boolean;
+}
+
+/** A short-leased step that can be cancelled while it runs, then a step that returns at once. */
+export const cancellable = defineWorkflow<CancellableInput>({
+  name: "cancellable",
+  steps: [
+    {
+      name: "work",
+      leaseMs: 300,
+      maxAttempts: 1,
+      async run(ctx) {
+        if (ctx.input.untilSignal) {
+          await sleep(10_000, undefined, { signal: ctx.signal }).catch(() => {});
+        } else {
+          await sleep(ctx.input.ms ?? 50);
+        }
+        return { done: true };
+      },
+    },
+    { name: "after", run: async () => null },
+  ],
+});
+
+export const workflows = [
+  pipeline,
+  slow,
+  flaky,
+  doomed,
+  diamond,
+  exclusive,
+  paired,
+  stalling,
+  cancellable,
+];

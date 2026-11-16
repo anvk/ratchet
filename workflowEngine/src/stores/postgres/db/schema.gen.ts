@@ -5,7 +5,7 @@
 
 import type { ColumnType } from "kysely";
 
-export type FailureReason = "attempts_exhausted" | "lost_worker" | "non_retryable" | "unknown_step";
+export type FailureReason = "attempts_exhausted" | "cancelled" | "lost_worker" | "non_retryable" | "unknown_step";
 
 export type Generated<T> = T extends ColumnType<infer S, infer I, infer U>
   ? ColumnType<S, I | undefined, U>
@@ -29,7 +29,7 @@ export type StepRunStatus = "failed" | "pending" | "ready" | "running" | "skippe
 
 export type Timestamp = ColumnType<Date, Date | string, Date | string>;
 
-export type WorkflowRunStatus = "failed" | "queued" | "running" | "succeeded";
+export type WorkflowRunStatus = "cancelled" | "failed" | "queued" | "running" | "succeeded";
 
 export interface Events {
   at: Generated<Timestamp>;

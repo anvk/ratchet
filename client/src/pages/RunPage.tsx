@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { canRedrive } from "@ratchet/engine/utils";
+import { useCancelRun } from "../hooks/mutations/useCancelRun";
 import { useRedriveRun } from "../hooks/mutations/useRedriveRun";
 import { useRun } from "../hooks/queries/useRun";
 import { useRunEvents } from "../hooks/queries/useRunEvents";
@@ -67,6 +68,7 @@ export function RunPage() {
   const finished = data ? isRunFinished(data.run.status) : false;
   const { data: events } = useRunEvents({ id, finished, enabled: !!data });
   const redrive = useRedriveRun({ id });
+  const cancel = useCancelRun({ id });
 
   if (error) {
     return (
@@ -104,6 +106,15 @@ export function RunPage() {
           <span className="font-mono text-[13px]">
             <Elapsed start={run.started_at} end={run.finished_at} />
           </span>
+          {!finished && (
+            <Button
+              disabled={cancel.isPending}
+              onClick={() => cancel.mutate()}
+              title="Stops this run: steps that haven't started are skipped and the running step's result is discarded. You can resume it afterwards."
+            >
+              Cancel run
+            </Button>
+          )}
           {canRedrive(run.status, run.failure_reason) && (
             <Button
               variant="primary"
@@ -111,11 +122,14 @@ export function RunPage() {
               onClick={() => redrive.mutate()}
               title="Runs the steps that didn't succeed again, with fresh attempts. Steps that succeeded keep their results."
             >
-              Resume from failed step
+              Resume run
             </Button>
           )}
         </div>
       </div>
+      {cancel.error && (
+        <ErrorMessage>Could not cancel this run: {cancel.error.message}</ErrorMessage>
+      )}
       {redrive.error && (
         <ErrorMessage>Could not resume this run: {redrive.error.message}</ErrorMessage>
       )}

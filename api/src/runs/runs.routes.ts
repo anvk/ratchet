@@ -77,8 +77,23 @@ export function runsRoutes({
     }
     if (!(await engine.redriveRun(id))) {
       const body: ErrorResponse = {
-        error: "Only a run that failed for a redrivable reason can be redriven",
+        error: "Only a cancelled run, or one that failed for a redrivable reason, can be redriven",
       };
+      return reply.code(409).send(body);
+    }
+    const body: StartRunResponse = { id };
+    return body;
+  });
+
+  // Through the engine too: cancelling a run changes its steps and writes events.
+  app.post("/runs/:id/cancel", async (req, reply) => {
+    const { id } = runParams.parse(req.params);
+    if (!(await getRun(id))) {
+      const body: ErrorResponse = { error: "Run not found" };
+      return reply.code(404).send(body);
+    }
+    if (!(await engine.cancelRun(id))) {
+      const body: ErrorResponse = { error: "Only a run that hasn't finished can be cancelled" };
       return reply.code(409).send(body);
     }
     const body: StartRunResponse = { id };

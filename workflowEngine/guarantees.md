@@ -52,13 +52,21 @@ What the engine promises. Each guarantee is backed by a test in
   steps that didn't succeed, with fresh attempts; steps that succeeded keep
   their outputs. Attempt numbers keep counting up, so a worker from before
   can't save over a new attempt. `non_retryable` runs can't be redriven.
+- **A run can be cancelled until it finishes.** Steps that haven't started
+  become `skipped`; a running step fails with reason `cancelled` and its late
+  result is rejected; the run becomes `cancelled`, not `failed`, and gives up
+  its concurrency slot. Cancelling takes the run's lock and changes every step in
+  one statement, so it can't miss a step that is being claimed. A cancelled run
+  can be resumed with a redrive.
 - **Every failed step and run records why.** `failure_reason` is set exactly
   when the status is `failed` (a database check enforces it): `non_retryable`,
-  `attempts_exhausted`, `lost_worker` or `unknown_step`.
+  `attempts_exhausted`, `lost_worker`, `unknown_step` or `cancelled`. On a step,
+  `cancelled` means it was running when its run was cancelled; the run itself
+  is `cancelled` with no failure reason.
 - **A concurrency group never runs more than its limit at once.** At most
   `limit` runs with the same concurrency key are in progress; a run is in
-  progress from when it is admitted until it finishes, succeeded or failed. The
-  others wait with no step ready, and are admitted oldest first as slots free
+  progress from when it is admitted until it finishes (succeeded, failed or
+  cancelled). The others wait with no step ready, and are admitted oldest first as slots free
   up. A run that fails or is redriven goes through the same admission. Counting
   the slots and admitting a run happen under one lock per key, so two runs can't
   take the same slot.
@@ -84,6 +92,9 @@ What the engine promises. Each guarantee is backed by a test in
   unique key or `ctx.idempotencyKey`.
 - **A timed-out step's function isn't stopped.** Unless it honours `ctx.signal`
   it keeps running in the background, and may overlap with its own retry.
+- **A running step hears about a cancel at its next heartbeat,** up to a third
+  of its lease later, and its function isn't stopped. Unless it honours
+  `ctx.signal` it keeps running until it returns, and its result is discarded.
 - **A step without `timeoutMs` that never returns runs forever,** for as long as
   its worker stays alive.
 - **A failed run ends only when its last running step does,** since steps
@@ -97,4 +108,5 @@ What the engine promises. Each guarantee is backed by a test in
   because heartbeats can't run. Give heavy synchronous steps a longer `leaseMs`.
 - **A run that never finishes keeps its concurrency slot.** If no worker can
   claim its steps (for example, no worker has its version), it stays in
-  progress, and the runs waiting behind it in its group wait too.
+  progress, and the runs waiting behind it in its group wait too, until someone
+  cancels it.
