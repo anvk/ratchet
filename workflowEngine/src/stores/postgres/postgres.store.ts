@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { sql } from "kysely";
 import { db, type Tx } from "./db/index.ts";
-import { retryOnDeadlock } from "./postgres.utils.ts";
 import {
   ancestors,
   canRedrive,
@@ -19,14 +18,6 @@ import type {
   WorkflowDefinition,
   WorkflowStore,
 } from "../../workflowEngine.types.ts";
-
-/**
- * Runs `run` in a transaction, and again if Postgres aborts it to break a
- * deadlock (see retryOnDeadlock). Every transaction in this store goes through
- * it, so each callback must have no effect outside its transaction.
- */
-const transaction = <T>(run: (trx: Tx) => Promise<T>) =>
-  retryOnDeadlock({ run: () => db.transaction().execute(run) });
 
 // Every state change calls this inside its own transaction, so the history
 // can never disagree with the current state.
@@ -86,7 +77,7 @@ function hashPlan(definition: WorkflowDefinition): string {
 /** Copies workflows into the plan tables. Unchanged workflows are left alone. */
 async function syncWorkflows(workflows: WorkflowDefinition[]) {
   for (const definition of workflows) {
-    await transaction(async (trx) => {
+    await db.transaction().execute(async (trx) => {
       const version = planVersion(definition);
       const created = await trx
         .insertInto("workflows")
@@ -204,7 +195,7 @@ async function startRun({
   idempotencyKey?: string;
   concurrency?: { key: string; limit: number };
 }): Promise<string> {
-  return transaction(async (trx) => {
+  return db.transaction().execute(async (trx) => {
     const workflow = await trx
       .selectFrom("workflows")
       .select("id")
@@ -405,7 +396,7 @@ async function claimStep({
 }): Promise<Claim | null> {
   if (workflows.length === 0) return null;
 
-  return transaction(async (trx) => {
+  return db.transaction().execute(async (trx) => {
     let query = trx
       .selectFrom("step_runs as sr")
       .innerJoin("workflow_runs as r", "r.id", "sr.run_id")
@@ -538,7 +529,7 @@ async function completeStep({
   claimNext: boolean;
   defaults: StepDefaults;
 }): Promise<{ completed: boolean; next: Claim | null }> {
-  return transaction(async (trx) => {
+  return db.transaction().execute(async (trx) => {
     await lockRun({ trx, runId: claim.runId });
     if (!(await finishOwnedStep({ trx, claim, status: "succeeded", output }))) {
       return { completed: false, next: null };
@@ -739,7 +730,7 @@ async function failStep({
   final: FinalFailure | null;
   defaults: StepDefaults;
 }): Promise<{ recorded: boolean; retryInMs: number | null; failureReason: FailureReason | null }> {
-  return transaction(async (trx) => {
+  return db.transaction().execute(async (trx) => {
     await lockRun({ trx, runId: claim.runId });
     const policy = await retryPolicy({ trx, stepRunId: claim.stepRunId, defaults });
 
@@ -832,7 +823,7 @@ async function sweepExpiredLeases({ defaults }: { defaults: StepDefaults }): Pro
 
   let swept = 0;
   for (const candidate of expired) {
-    const handled = await transaction(async (trx) => {
+    const handled = await db.transaction().execute(async (trx) => {
       await lockRun({ trx, runId: candidate.run_id });
       // Checked again under the lock: its worker may have finished or renewed
       // it since, or another orchestrator may have swept it.
@@ -917,7 +908,7 @@ async function sweepExpiredLeases({ defaults }: { defaults: StepDefaults }): Pro
  * false, changing nothing, if the run can't be redriven.
  */
 async function redriveRun({ runId }: { runId: string }): Promise<boolean> {
-  return transaction(async (trx) => {
+  return db.transaction().execute(async (trx) => {
     await lockRun({ trx, runId });
     const run = await trx
       .selectFrom("workflow_runs")
@@ -980,7 +971,7 @@ async function redriveRun({ runId }: { runId: string }): Promise<boolean> {
  * (see takeStep), which never waits for the run, so the two can't deadlock.
  */
 async function cancelRun({ runId }: { runId: string }): Promise<boolean> {
-  return transaction(async (trx) => {
+  return db.transaction().execute(async (trx) => {
     // Lock and read in one query: lockRun throws when the row is missing.
     // FOR NO KEY UPDATE, not FOR UPDATE. It still conflicts with lockRun's FOR
     // UPDATE, so every other change to the run's steps waits for the cancel, and
