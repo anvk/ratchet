@@ -4,6 +4,7 @@ import { healthRoutes } from "./health/health.routes.ts";
 import { errorHandler } from "./middlewares/errorHandler.ts";
 import { notFound } from "./middlewares/notFound.ts";
 import { runsRoutes } from "./runs/runs.routes.ts";
+import { schedulesRoutes } from "./schedules/schedules.routes.ts";
 import { workflowsRoutes } from "./workflows/workflows.routes.ts";
 import type { Preset, WorkflowLabels } from "./api.types.ts";
 
@@ -25,6 +26,7 @@ export function buildApp(engine: WorkflowEngine, options: ApiOptions = {}) {
   healthRoutes(app);
   workflowsRoutes({ app, engine, ...options });
   runsRoutes({ app, engine, labels: options.labels });
+  schedulesRoutes({ app, engine, labels: options.labels });
 
   return app;
 }

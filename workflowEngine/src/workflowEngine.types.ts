@@ -140,6 +140,14 @@ export interface EventFields {
   detail?: unknown;
 }
 
+/** What the engine tells the store about a due schedule's run: the workflow's code and its concurrency group. */
+export interface ScheduledRun {
+  /** The workflow the schedule belongs to. */
+  definition: WorkflowDefinition;
+  /** Worked out by the engine from the schedule's input. See WorkflowStore.startRun. */
+  concurrency?: { key: string; limit: number };
+}
+
 /**
  * Where workflow state lives. The engine only talks to this interface, so a
  * file or another database can replace Postgres by implementing it.
@@ -234,6 +242,62 @@ export interface WorkflowStore {
    * doesn't exist or has finished. A cancelled run can be redriven.
    */
   cancelRun(request: { runId: string }): Promise<boolean>;
+  /**
+   * Saves a schedule of a workflow, named by the workflow's name. With `cron`
+   * it repeats, and its first run is at the next tick after now. With `at` it
+   * fires once, at that moment. Returns false, saving nothing, if the workflow
+   * already has a schedule with this name. Throws InvalidScheduleError, saving
+   * nothing, if `at` is not after now.
+   */
+  createSchedule(request: {
+    workflow: string;
+    name: string;
+    cron?: string;
+    at?: Date;
+    input: unknown;
+  }): Promise<boolean>;
+  /**
+   * Changes a schedule. A `cron` that differs from the saved one reschedules it
+   * to the next tick after now. An `input` alone leaves its next run where it
+   * was. An `at` moves a one-time schedule's moment. Returns false, changing
+   * nothing, if there is no such schedule, or if it is a one-time schedule that
+   * has already fired. Throws InvalidScheduleError if `cron` is given for a one-time schedule, if
+   * `at` is given for a repeating one, or if `at` is not after now.
+   */
+  updateSchedule(request: {
+    workflow: string;
+    name: string;
+    cron?: string;
+    at?: Date;
+    input?: unknown;
+  }): Promise<boolean>;
+  /**
+   * Removes a schedule. The runs it started stay, untouched, with their
+   * `scheduled_for` and the schedule's id. Returns false if there is no such
+   * schedule.
+   */
+  deleteSchedule(request: { workflow: string; name: string }): Promise<boolean>;
+  /**
+   * Pauses or resumes a schedule. A paused schedule fires nothing. Resuming a
+   * repeating schedule continues from the next tick after now, with no run for
+   * the ticks skipped; resuming a one-time schedule leaves its moment as it was,
+   * so one whose moment passed fires on the next round. Returns false, changing
+   * nothing, if there is no such schedule or it is already in that state.
+   */
+  setSchedulePaused(request: { workflow: string; name: string; paused: boolean }): Promise<boolean>;
+  /**
+   * Starts a run for each due, unpaused schedule of these workflows, and moves
+   * it on to its next tick; a one-time schedule has none afterwards. A schedule
+   * starts one run per tick however many processes call this at once. If ticks
+   * were missed, it starts one run and resumes from now. `scheduledRunFor` is called for
+   * each due schedule with its workflow, name and input, and returns the
+   * workflow's code and concurrency group. Schedules of other workflows are left
+   * alone. Returns how many runs it started.
+   */
+  fireDueSchedules(request: {
+    workflows: WorkflowDefinition[];
+    scheduledRunFor: (schedule: { workflow: string; name: string; input: unknown }) => ScheduledRun;
+  }): Promise<number>;
   /** Releases connections or file handles. */
   close(): Promise<void>;
 }
@@ -268,7 +332,10 @@ export interface WorkflowEngineSettings {
   claimOrder: ClaimOrder;
   /** The lease for steps that don't set their own. See StepDefinition.leaseMs. */
   leaseMs: number;
-  /** How often the orchestrator sweeps for expired leases. */
+  /**
+   * How often the orchestrator does its rounds: sweeping expired leases and
+   * starting due scheduled runs.
+   */
   sweepIntervalMs: number;
   /** How many times a step may run, for steps that don't set their own. See StepDefinition.maxAttempts. */
   maxAttempts: number;
@@ -282,7 +349,11 @@ export interface WorkflowEngineSettings {
 export interface WorkflowEngine {
   readonly registry: Registry;
   readonly settings: WorkflowEngineSettings;
-  /** Saves this engine's workflows to its store. Call before starting runs. */
+  /**
+   * Saves this engine's workflows to its store. Call it before starting runs, in
+   * every process that starts runs; that includes the orchestrator, which starts
+   * scheduled runs.
+   */
   sync(): Promise<void>;
   /**
    * Starts a run of one of this engine's workflows, by name, and returns its
@@ -307,10 +378,61 @@ export interface WorkflowEngine {
   runWorker(options?: { workerId?: string }): Promise<void>;
   /**
    * Runs the orchestrator until the engine is closed. It looks after runs as a
-   * whole; so far, every sweepIntervalMs it makes steps whose worker stopped
-   * sending heartbeats ready again.
+   * whole, and every sweepIntervalMs does two jobs: it makes steps whose worker
+   * stopped sending heartbeats ready again, and it starts a run for each
+   * schedule of this engine's workflows that is due and not paused.
    */
   runOrchestrator(): Promise<void>;
+  /**
+   * Schedules start runs of a workflow by the clock. They live in the store, not
+   * in the workflow's definition, and are not part of a workflow's version. A
+   * schedule has a name, unique within its workflow, and the input each of its
+   * runs starts with (an empty object by default). Its runs start on whatever
+   * version of the workflow the firing orchestrator has. A tick starts a run
+   * even if the last one is still going, unless `concurrency` prevents it. Every
+   * method throws UnknownWorkflowError for a workflow this engine doesn't have,
+   * and InvalidScheduleError for a request that can't be a schedule (see that class).
+   */
+  readonly schedules: {
+    /**
+     * Saves a schedule, with exactly one of `cron` (repeats; five fields, in UTC:
+     * minute, hour, day of month, month, day of week) and `at` (fires once, at
+     * that moment, which must be in the future). Returns false, saving nothing,
+     * if the workflow already has a schedule with this name. See
+     * WorkflowStore.createSchedule.
+     */
+    create(request: {
+      workflow: string;
+      name: string;
+      cron?: string;
+      at?: Date;
+      input?: unknown;
+    }): Promise<boolean>;
+    /**
+     * Changes a schedule's `cron`, `at` or `input`; at least one is needed. A new
+     * cron reschedules from now, and an input alone keeps the next tick. Returns
+     * false if there is no such schedule, or if it fires once and already has.
+     * Throws if `cron` is given for a one-time schedule or `at` for a repeating
+     * one. See WorkflowStore.updateSchedule.
+     */
+    update(request: {
+      workflow: string;
+      name: string;
+      cron?: string;
+      at?: Date;
+      input?: unknown;
+    }): Promise<boolean>;
+    /** Removes a schedule. The runs it started stay, keeping its id. False if there is no such schedule. */
+    delete(request: { workflow: string; name: string }): Promise<boolean>;
+    /** Stops a schedule from firing; it skips its ticks. False if it is missing or already paused. */
+    pause(request: { workflow: string; name: string }): Promise<boolean>;
+    /**
+     * Lets a paused schedule fire again, from the next tick after now with no
+     * catch-up run. False if it is missing or not paused. See
+     * WorkflowStore.setSchedulePaused.
+     */
+    resume(request: { workflow: string; name: string }): Promise<boolean>;
+  };
   /**
    * Stops workers from claiming more steps, waits for the steps they are running
    * for up to closeTimeoutMs, then closes the store. Safe to call more than once.

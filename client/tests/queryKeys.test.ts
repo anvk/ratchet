@@ -32,3 +32,8 @@ test("a run's events get a new key when it finishes", () => {
     QUERY_KEYS.runs.events({ id: "r1", finished: true }),
   );
 });
+
+test("the schedules list has its own key, apart from the runs and workflows", () => {
+  assert.deepEqual(QUERY_KEYS.schedules.list(), ["schedules", "list"]);
+  assert.notDeepEqual(QUERY_KEYS.schedules.list(), QUERY_KEYS.workflows.list());
+});

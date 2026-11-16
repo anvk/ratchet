@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { sql } from "kysely";
+import { InvalidScheduleError } from "../../workflowEngine.errors.ts";
 import { db, type Tx } from "./db/index.ts";
 import {
   ancestors,
@@ -8,12 +9,14 @@ import {
   resolveNeeds,
   retryDelayMs,
 } from "../../workflowEngine.utils.ts";
+import { nextFireAfter } from "../../workflowEngine.cron.ts";
 import type { FailureReason } from "../../workflowEngine.constants.ts";
 import type {
   Claim,
   ClaimOrder,
   EventFields,
   FinalFailure,
+  ScheduledRun,
   StepDefaults,
   WorkflowDefinition,
   WorkflowStore,
@@ -74,16 +77,15 @@ function hashPlan(definition: WorkflowDefinition): string {
   return createHash("sha256").update(JSON.stringify(plan)).digest("hex").slice(0, 12);
 }
 
-/** Copies workflows into the plan tables. Unchanged workflows are left alone. */
+/** Copies workflows into the plan tables. Workflows already saved are left alone. */
 async function syncWorkflows(workflows: WorkflowDefinition[]) {
   for (const definition of workflows) {
     await db.transaction().execute(async (trx) => {
-      const version = planVersion(definition);
       const created = await trx
         .insertInto("workflows")
         .values({
           name: definition.name,
-          version,
+          version: planVersion(definition),
         })
         .onConflict((oc) => oc.columns(["name", "version"]).doNothing())
         .returning("id")
@@ -113,7 +115,7 @@ async function syncWorkflows(workflows: WorkflowDefinition[]) {
  * Takes the lock of one concurrency group until the transaction ends. Counting
  * a group's slots and giving them away happens under it, so two transactions
  * can never both see the same free slot. It needs no row to exist. Lock order:
- * run, then group, then steps. Call it before admitWaitingRuns.
+ * schedule, then run, then group, then steps. Call it before admitWaitingRuns.
  */
 async function lockGroup({ trx, key }: { trx: Tx; key: string }) {
   await sql`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`.execute(trx);
@@ -195,82 +197,114 @@ async function startRun({
   idempotencyKey?: string;
   concurrency?: { key: string; limit: number };
 }): Promise<string> {
-  return db.transaction().execute(async (trx) => {
-    const workflow = await trx
-      .selectFrom("workflows")
+  return db
+    .transaction()
+    .execute((trx) => insertRun({ trx, definition, input, idempotencyKey, concurrency }));
+}
+
+/**
+ * The body of startRun, inside the caller's transaction, so a schedule can start
+ * its run in the same transaction that moves it to its next tick. With
+ * `schedule`, the run also records which schedule and tick started it. Takes the
+ * group's lock before inserting, so the caller may hold a schedule's lock (the
+ * outermost) but never a run's or a group's.
+ */
+async function insertRun({
+  trx,
+  definition,
+  input = {},
+  idempotencyKey,
+  concurrency,
+  schedule,
+}: {
+  trx: Tx;
+  definition: WorkflowDefinition;
+  input?: unknown;
+  idempotencyKey?: string;
+  concurrency?: { key: string; limit: number };
+  schedule?: { id: string; name: string; scheduledFor: Date };
+}): Promise<string> {
+  const workflow = await trx
+    .selectFrom("workflows")
+    .select("id")
+    .where("name", "=", definition.name)
+    .where("version", "=", planVersion(definition))
+    .executeTakeFirstOrThrow();
+
+  const steps = await trx
+    .selectFrom("steps")
+    .select(["id", "name", "position", "needs"])
+    .where("workflow_id", "=", workflow.id)
+    .orderBy("position")
+    .execute();
+
+  // The group lock comes before the insert, so the new run is counted and
+  // admitted under the same lock as everything else in its group.
+  if (concurrency) await lockGroup({ trx, key: concurrency.key });
+
+  const run = await trx
+    .insertInto("workflow_runs")
+    .values({
+      workflow_id: workflow.id,
+      input: JSON.stringify(input),
+      idempotency_key: idempotencyKey ?? null,
+      concurrency_key: concurrency?.key ?? null,
+      concurrency_limit: concurrency?.limit ?? null,
+      // Not now(), which is the transaction's start time and can be earlier
+      // than the moment the run was actually admitted. A run in a group is
+      // admitted below, once it has been counted.
+      admitted_at: concurrency ? null : sql<Date>`clock_timestamp()`,
+      schedule_id: schedule?.id ?? null,
+      scheduled_for: schedule?.scheduledFor ?? null,
+    })
+    // Handles two identical requests racing: the loser waits, then does nothing.
+    .onConflict((oc) => oc.column("idempotency_key").doNothing())
+    .returning("id")
+    .executeTakeFirst();
+
+  if (!run) {
+    // Only a repeated key can conflict, so idempotencyKey is always set here.
+    const existing = await trx
+      .selectFrom("workflow_runs")
       .select("id")
-      .where("name", "=", definition.name)
-      .where("version", "=", planVersion(definition))
+      .where("idempotency_key", "=", idempotencyKey!)
       .executeTakeFirstOrThrow();
+    return existing.id;
+  }
 
-    const steps = await trx
-      .selectFrom("steps")
-      .select(["id", "name", "position", "needs"])
-      .where("workflow_id", "=", workflow.id)
-      .orderBy("position")
-      .execute();
-
-    // The group lock comes before the insert, so the new run is counted and
-    // admitted under the same lock as everything else in its group.
-    if (concurrency) await lockGroup({ trx, key: concurrency.key });
-
-    const run = await trx
-      .insertInto("workflow_runs")
-      .values({
-        workflow_id: workflow.id,
-        input: JSON.stringify(input),
-        idempotency_key: idempotencyKey ?? null,
-        concurrency_key: concurrency?.key ?? null,
-        concurrency_limit: concurrency?.limit ?? null,
-        // Not now(), which is the transaction's start time and can be earlier
-        // than the moment the run was actually admitted. A run in a group is
-        // admitted below, once it has been counted.
-        admitted_at: concurrency ? null : sql<Date>`clock_timestamp()`,
-      })
-      // Handles two identical requests racing: the loser waits, then does nothing.
-      .onConflict((oc) => oc.column("idempotency_key").doNothing())
-      .returning("id")
-      .executeTakeFirst();
-
-    if (!run) {
-      // Only a repeated key can conflict, so idempotencyKey is always set here.
-      const existing = await trx
-        .selectFrom("workflow_runs")
-        .select("id")
-        .where("idempotency_key", "=", idempotencyKey!)
-        .executeTakeFirstOrThrow();
-      return existing.id;
-    }
-
-    await emit({ trx, runId: run.id, type: "run_queued" });
-
-    // In a group, every step starts pending: admission readies the first ones.
-    const ready = (step: { needs: string[] }) => !concurrency && step.needs.length === 0;
-    await trx
-      .insertInto("step_runs")
-      .values(
-        steps.map((step) => ({
-          run_id: run.id,
-          step_id: step.id,
-          name: step.name,
-          position: step.position,
-          needs: step.needs,
-          status: ready(step) ? ("ready" as const) : ("pending" as const),
-          ready_at: ready(step) ? sql<Date>`now()` : null,
-        })),
-      )
-      .execute();
-    for (const step of steps.filter(ready)) {
-      await emit({ trx, runId: run.id, type: "step_ready", stepName: step.name });
-    }
-
-    if (concurrency) {
-      await admitWaitingRuns({ trx, key: concurrency.key });
-      await emitWaitingIfNotAdmitted({ trx, runId: run.id });
-    }
-
-    return run.id;
+  await emit({
+    trx,
+    runId: run.id,
+    type: "run_queued",
+    detail: schedule && { schedule: schedule.name, scheduledFor: schedule.scheduledFor },
   });
+
+  // In a group, every step starts pending: admission readies the first ones.
+  const ready = (step: { needs: string[] }) => !concurrency && step.needs.length === 0;
+  await trx
+    .insertInto("step_runs")
+    .values(
+      steps.map((step) => ({
+        run_id: run.id,
+        step_id: step.id,
+        name: step.name,
+        position: step.position,
+        needs: step.needs,
+        status: ready(step) ? ("ready" as const) : ("pending" as const),
+        ready_at: ready(step) ? sql<Date>`now()` : null,
+      })),
+    )
+    .execute();
+  for (const step of steps.filter(ready)) {
+    await emit({ trx, runId: run.id, type: "step_ready", stepName: step.name });
+  }
+
+  if (concurrency) {
+    await admitWaitingRuns({ trx, key: concurrency.key });
+    await emitWaitingIfNotAdmitted({ trx, runId: run.id });
+  }
+
+  return run.id;
 }
 
 /** A timestamp this many milliseconds from now, by the database's clock. */
@@ -462,7 +496,8 @@ async function finishOwnedStep({
  * steps takes this lock first, so two steps of one run finishing at the same
  * moment take turns, and the second one sees the first as finished. The order
  * everywhere is the run's lock, then its group's lock (lockGroup), then its
- * steps' locks, so two transactions can never end up waiting on each other.
+ * steps' locks (a schedule's row lock, taken by fireDueSchedules, comes before
+ * all of them), so two transactions can never end up waiting on each other.
  * Cancelling a run takes it too, in its own query (see cancelRun).
  */
 async function lockRun({ trx, runId }: { trx: Tx; runId: string }) {
@@ -1035,6 +1070,282 @@ async function cancelRun({ runId }: { runId: string }): Promise<boolean> {
   });
 }
 
+/**
+ * The database's clock right now, not as of the transaction's start, which can
+ * be earlier than a row lock was won. Schedules are timed by it, never by the
+ * process's.
+ */
+async function databaseNow(trx: Tx): Promise<Date> {
+  const { rows } = await sql<{ now: Date }>`SELECT clock_timestamp() AS now`.execute(trx);
+  return rows[0].now;
+}
+
+/** Throws unless `at` is after `now`: a moment that has passed can't be scheduled. */
+function assertAfterNow({ at, now }: { at: Date; now: Date }) {
+  if (at <= now)
+    throw new InvalidScheduleError(`A schedule's \`at\` (${at.toISOString()}) isn't in the future`);
+}
+
+/**
+ * Saves a schedule, or returns false if the workflow already has one with this
+ * name. One transaction, so the database's now, which the first tick or the
+ * check of `at` is counted from, is the same one the row is created at.
+ */
+async function createSchedule({
+  workflow,
+  name,
+  cron,
+  at,
+  input,
+}: {
+  workflow: string;
+  name: string;
+  cron?: string;
+  at?: Date;
+  input: unknown;
+}): Promise<boolean> {
+  return db.transaction().execute(async (trx) => {
+    const now = await databaseNow(trx);
+    if (at !== undefined) assertAfterNow({ at, now });
+    const created = await trx
+      .insertInto("schedules")
+      .values({
+        workflow,
+        name,
+        cron: cron ?? null,
+        input: JSON.stringify(input),
+        next_fire_at: cron !== undefined ? nextFireAfter({ cron, after: now }) : at!,
+      })
+      .onConflict((oc) => oc.columns(["workflow", "name"]).doNothing())
+      .returning("id")
+      .executeTakeFirst();
+    return created !== undefined;
+  });
+}
+
+/**
+ * Changes a schedule, or returns false if it doesn't exist or is a one-time
+ * schedule that has fired. Locks the schedule's row first, so an edit and a
+ * firing take turns, and the cron it compares with is the one that is saved.
+ * Lock order: only the schedule's row, nothing else.
+ */
+async function updateSchedule({
+  workflow,
+  name,
+  cron,
+  at,
+  input,
+}: {
+  workflow: string;
+  name: string;
+  cron?: string;
+  at?: Date;
+  input?: unknown;
+}): Promise<boolean> {
+  return db.transaction().execute(async (trx) => {
+    const row = await trx
+      .selectFrom("schedules")
+      .select(["id", "cron", "next_fire_at"])
+      .where("workflow", "=", workflow)
+      .where("name", "=", name)
+      .forUpdate()
+      .executeTakeFirst();
+    if (!row) return false;
+
+    if (cron !== undefined && row.cron === null) {
+      throw new InvalidScheduleError(
+        `Schedule ${workflow}/${name} fires once, so it has no cron to change`,
+      );
+    }
+    if (at !== undefined && row.cron !== null) {
+      throw new InvalidScheduleError(
+        `Schedule ${workflow}/${name} repeats, so it has no \`at\` to change`,
+      );
+    }
+    if (at !== undefined && row.next_fire_at === null) return false;
+
+    const now = await databaseNow(trx);
+    if (at !== undefined) assertAfterNow({ at, now });
+    const changes = {
+      ...(cron !== undefined && cron !== row.cron
+        ? { cron, next_fire_at: nextFireAfter({ cron, after: now }) }
+        : {}),
+      ...(at !== undefined ? { next_fire_at: at } : {}),
+      ...(input !== undefined ? { input: JSON.stringify(input) } : {}),
+    };
+    // Giving the cron it already has changes nothing, and an UPDATE needs something to set.
+    if (Object.keys(changes).length > 0) {
+      await trx.updateTable("schedules").set(changes).where("id", "=", row.id).execute();
+    }
+    return true;
+  });
+}
+
+/** Removes a schedule, or returns false if it doesn't exist. Only the schedule's row changes: its runs stay and keep its id as their schedule_id. */
+async function deleteSchedule({
+  workflow,
+  name,
+}: {
+  workflow: string;
+  name: string;
+}): Promise<boolean> {
+  const deleted = await db
+    .deleteFrom("schedules")
+    .where("workflow", "=", workflow)
+    .where("name", "=", name)
+    .returning("id")
+    .executeTakeFirst();
+  return deleted !== undefined;
+}
+
+/**
+ * Pauses or resumes a schedule, or returns false if it doesn't exist or is
+ * already in that state. Pausing is one statement. Resuming locks the row, then
+ * clears paused_at and, for a repeating schedule, moves next_fire_at to the
+ * first tick after now, so the ticks skipped while paused start no runs. A
+ * one-time schedule keeps its moment.
+ */
+async function setSchedulePaused({
+  workflow,
+  name,
+  paused,
+}: {
+  workflow: string;
+  name: string;
+  paused: boolean;
+}): Promise<boolean> {
+  if (paused) {
+    const updated = await db
+      .updateTable("schedules")
+      .set({ paused_at: sql<Date>`now()` })
+      .where("workflow", "=", workflow)
+      .where("name", "=", name)
+      .where("paused_at", "is", null)
+      .returning("id")
+      .executeTakeFirst();
+    return updated !== undefined;
+  }
+  return db.transaction().execute(async (trx) => {
+    const row = await trx
+      .selectFrom("schedules")
+      .select(["id", "cron", "paused_at"])
+      .where("workflow", "=", workflow)
+      .where("name", "=", name)
+      .forUpdate()
+      .executeTakeFirst();
+    if (!row || row.paused_at === null) return false;
+
+    await trx
+      .updateTable("schedules")
+      .set({
+        paused_at: null,
+        ...(row.cron !== null
+          ? { next_fire_at: nextFireAfter({ cron: row.cron, after: await databaseNow(trx) }) }
+          : {}),
+      })
+      .where("id", "=", row.id)
+      .execute();
+    return true;
+  });
+}
+
+/** The most due schedules one fireDueSchedules call starts, so one call can't run forever. */
+const MAX_FIRES_PER_CALL = 100;
+
+/**
+ * Starts a run for each due, unpaused schedule of the given workflows and moves
+ * it to its next tick, and returns how many runs it started. A schedule of any
+ * other workflow is not looked at.
+ *
+ * Each firing is one transaction: lock the due schedule's row, start the run,
+ * and move next_fire_at forward (to null for a one-time schedule, which has no
+ * more ticks). They commit together, so a schedule is never left due after its
+ * run started, or advanced without its run. `scheduledRunFor` supplies the run's code
+ * and concurrency group from the row's input.
+ *
+ * The lock is FOR UPDATE SKIP LOCKED, like claimStep's: an orchestrator that
+ * finds the row locked by another doesn't wait for it, it moves on, and by the
+ * time it looks again the row is no longer due. So a tick starts one run however
+ * many orchestrators run, and an edit holding the row makes a firing skip it
+ * rather than wait. If that were ever wrong, the second insert would break the
+ * unique (schedule_id, scheduled_for) on workflow_runs and fail loudly; nothing
+ * here catches it.
+ *
+ * A schedule far behind (no orchestrator was running) fires once, for its old
+ * tick, and resumes from the first tick after now: no backlog of runs. "Now" is
+ * the database's, read in the same statement that finds the due row.
+ *
+ * Lock order: the schedule's row lock is the outermost, before the group lock
+ * and the run's and steps' locks that starting a run takes. Nothing holding a
+ * run or group lock ever asks for a schedule row.
+ */
+async function fireDueSchedules({
+  workflows,
+  scheduledRunFor,
+}: {
+  workflows: WorkflowDefinition[];
+  scheduledRunFor: (schedule: { workflow: string; name: string; input: unknown }) => ScheduledRun;
+}): Promise<number> {
+  if (workflows.length === 0) return 0;
+  const names = workflows.map((workflow) => workflow.name);
+
+  let started = 0;
+  for (let i = 0; i < MAX_FIRES_PER_CALL; i++) {
+    const fired = await db.transaction().execute(async (trx) => {
+      const due = await trx
+        .selectFrom("schedules")
+        .select([
+          "id",
+          "workflow",
+          "name",
+          "cron",
+          "input",
+          "next_fire_at",
+          sql<Date>`now()`.as("now"),
+        ])
+        .where("workflow", "in", names)
+        .where("paused_at", "is", null)
+        .where("next_fire_at", "<=", sql<Date>`now()`)
+        .orderBy("next_fire_at")
+        .orderBy("id")
+        .limit(1)
+        .forUpdate()
+        .skipLocked()
+        .executeTakeFirst();
+      if (!due) return false;
+
+      // Due rows have a next_fire_at: the query above compares it.
+      const scheduledFor = due.next_fire_at!;
+      const { definition, concurrency } = scheduledRunFor({
+        workflow: due.workflow,
+        name: due.name,
+        input: due.input,
+      });
+      await insertRun({
+        trx,
+        definition,
+        input: due.input,
+        concurrency,
+        schedule: { id: due.id, name: due.name, scheduledFor },
+      });
+
+      const after = new Date(Math.max(scheduledFor.getTime(), due.now.getTime()));
+      await trx
+        .updateTable("schedules")
+        .set({
+          next_fire_at: due.cron === null ? null : nextFireAfter({ cron: due.cron, after }),
+          last_fired_at: due.now,
+        })
+        .where("id", "=", due.id)
+        .execute();
+      return true;
+    });
+    if (!fired) break;
+    started++;
+  }
+  return started;
+}
+
 export function createPostgresStore(): WorkflowStore {
   return {
     syncWorkflows,
@@ -1046,6 +1357,11 @@ export function createPostgresStore(): WorkflowStore {
     failStep,
     redriveRun,
     cancelRun,
+    createSchedule,
+    updateSchedule,
+    deleteSchedule,
+    setSchedulePaused,
+    fireDueSchedules,
     close: () => db.destroy(),
   };
 }

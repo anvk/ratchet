@@ -1,12 +1,14 @@
 import { DEFAULT_ENGINE_SETTINGS } from "./workflowEngine.constants.ts";
 import type {
   Registry,
+  ScheduledRun,
   WorkflowDefinition,
   WorkflowEngine,
   WorkflowEngineSettings,
   WorkflowStore,
 } from "./workflowEngine.types.ts";
-import { UnknownWorkflowError } from "./workflowEngine.errors.ts";
+import { InvalidScheduleError, UnknownWorkflowError } from "./workflowEngine.errors.ts";
+import { assertCronFires } from "./workflowEngine.cron.ts";
 import { assertUnique } from "./workflowEngine.utils.ts";
 import { runOrchestrator } from "./workflowEngine.orchestrator.ts";
 import { runWorker } from "./workflowEngine.worker.ts";
@@ -61,6 +63,24 @@ export function defineWorkflow<Input = unknown>(
 }
 
 /**
+ * The concurrency group a run of a workflow with this input belongs to, or
+ * undefined when the workflow has no `concurrency` or its key is null. Runs
+ * the workflow's key function, which is user code, so the store never has to.
+ */
+function concurrencyFor({
+  definition,
+  input,
+}: {
+  definition: WorkflowDefinition;
+  input: unknown;
+}): { key: string; limit: number } | undefined {
+  const key = definition.concurrency?.key(input);
+  return definition.concurrency && key != null
+    ? { key, limit: definition.concurrency.limit }
+    : undefined;
+}
+
+/**
  * Creates an engine from its workflows, storage and settings. Several engines
  * can run side by side, each only claiming work from its own workflows.
  */
@@ -107,19 +127,76 @@ export function createWorkflowEngine({
     clearTimeout(timer);
   }
 
+  /** Throws UnknownWorkflowError, or InvalidScheduleError for an empty name, so nothing reaches the store. */
+  function assertScheduleTarget({ workflow, name }: { workflow: string; name: string }) {
+    if (!registry.has(workflow)) throw new UnknownWorkflowError(workflow);
+    if (name.trim() === "") throw new InvalidScheduleError("A schedule needs a name");
+  }
+
+  /** Throws unless `at` is a valid date. Whether it is in the future is for the store, which has the database's clock. */
+  function assertValidAt(at: Date) {
+    if (Number.isNaN(at.getTime()))
+      throw new InvalidScheduleError("A schedule's `at` isn't a valid date");
+  }
+
+  const schedules: WorkflowEngine["schedules"] = {
+    async create({ workflow, name, cron, at, input }) {
+      assertScheduleTarget({ workflow, name });
+      if ((cron === undefined) === (at === undefined)) {
+        throw new InvalidScheduleError("A schedule needs exactly one of `cron` and `at`");
+      }
+      if (cron !== undefined) assertCronFires(cron);
+      if (at !== undefined) assertValidAt(at);
+      return store.createSchedule({ workflow, name, cron, at, input: input ?? {} });
+    },
+    async update({ workflow, name, cron, at, input }) {
+      assertScheduleTarget({ workflow, name });
+      if (cron === undefined && at === undefined && input === undefined) {
+        throw new InvalidScheduleError("An update needs at least one of `cron`, `at` and `input`");
+      }
+      if (cron !== undefined && at !== undefined) {
+        throw new InvalidScheduleError("A schedule has either `cron` or `at`, not both");
+      }
+      if (cron !== undefined) assertCronFires(cron);
+      if (at !== undefined) assertValidAt(at);
+      return store.updateSchedule({ workflow, name, cron, at, input });
+    },
+    async delete({ workflow, name }) {
+      assertScheduleTarget({ workflow, name });
+      return store.deleteSchedule({ workflow, name });
+    },
+    async pause({ workflow, name }) {
+      assertScheduleTarget({ workflow, name });
+      return store.setSchedulePaused({ workflow, name, paused: true });
+    },
+    async resume({ workflow, name }) {
+      assertScheduleTarget({ workflow, name });
+      return store.setSchedulePaused({ workflow, name, paused: false });
+    },
+  };
+
+  /** What a due schedule's run needs: its workflow's code, and the concurrency group its input falls in. */
+  function scheduledRunFor({
+    workflow,
+    input,
+  }: {
+    workflow: string;
+    input: unknown;
+  }): ScheduledRun {
+    const definition = registry.get(workflow)!;
+    return { definition, concurrency: concurrencyFor({ definition, input }) };
+  }
+
   return {
     registry,
     settings,
+    schedules,
     sync: () => store.syncWorkflows(workflows),
     startRun({ workflow, input, idempotencyKey }) {
       const definition = registry.get(workflow);
       if (!definition) return Promise.reject(new UnknownWorkflowError(workflow));
       try {
-        const key = definition.concurrency?.key(input);
-        const concurrency =
-          definition.concurrency && key != null
-            ? { key, limit: definition.concurrency.limit }
-            : undefined;
+        const concurrency = concurrencyFor({ definition, input });
         return store.startRun({ definition, input, idempotencyKey, concurrency });
       } catch (err) {
         return Promise.reject(err);
@@ -129,7 +206,16 @@ export function createWorkflowEngine({
     cancelRun: (runId) => store.cancelRun({ runId }),
     runWorker: ({ workerId } = {}) =>
       track(runWorker({ registry, store, settings, stopSignal: stop.signal, workerId })),
-    runOrchestrator: () => track(runOrchestrator({ store, settings, stopSignal: stop.signal })),
+    runOrchestrator: () =>
+      track(
+        runOrchestrator({
+          store,
+          settings,
+          stopSignal: stop.signal,
+          workflows,
+          scheduledRunFor,
+        }),
+      ),
     async close({ force = false } = {}) {
       stop.abort();
       if (!force) await waitForLoops();

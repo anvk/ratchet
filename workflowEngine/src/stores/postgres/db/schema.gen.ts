@@ -42,6 +42,18 @@ export interface Events {
   worker_id: string | null;
 }
 
+export interface Schedules {
+  created_at: Generated<Timestamp>;
+  cron: string | null;
+  id: Generated<string>;
+  input: Generated<Json>;
+  last_fired_at: Timestamp | null;
+  name: string;
+  next_fire_at: Timestamp | null;
+  paused_at: Timestamp | null;
+  workflow: string;
+}
+
 export interface StepRuns {
   attempt: Generated<number>;
   error: string | null;
@@ -83,6 +95,8 @@ export interface WorkflowRuns {
   id: Generated<string>;
   idempotency_key: string | null;
   input: Generated<Json>;
+  schedule_id: string | null;
+  scheduled_for: Timestamp | null;
   started_at: Timestamp | null;
   status: Generated<WorkflowRunStatus>;
   workflow_id: string;
@@ -97,6 +111,7 @@ export interface Workflows {
 
 export interface DB {
   events: Events;
+  schedules: Schedules;
   step_runs: StepRuns;
   steps: Steps;
   workflow_runs: WorkflowRuns;

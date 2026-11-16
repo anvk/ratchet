@@ -3,6 +3,7 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { WORKFLOW_RUN_STATUSES, type WorkflowRunStatus } from "@ratchet/engine/constants";
 import { useStartRuns } from "../hooks/mutations/useStartRuns";
 import { useRuns } from "../hooks/queries/useRuns";
+import { useSchedules } from "../hooks/queries/useSchedules";
 import { useWorkflows } from "../hooks/queries/useWorkflows";
 import { Age } from "../components/Age";
 import { Elapsed } from "../components/Elapsed";
@@ -11,6 +12,7 @@ import { FAILURE_REASON_LABELS, RUN_STATUS_LABELS } from "../constants/statuses"
 import { URLS } from "../urls";
 import { Button } from "../components/Button";
 import { ErrorMessage } from "../components/ErrorMessage";
+import { SchedulesPanel } from "../components/SchedulesPanel";
 import { Select } from "../components/Select";
 
 const TABS = WORKFLOW_RUN_STATUSES;
@@ -35,6 +37,7 @@ export function RunsPage() {
 
   const { data, error } = useRuns({ status: tab, cursor });
   const { data: workflows } = useWorkflows();
+  const { data: schedules } = useSchedules();
   const workflow = workflows?.find((w) => w.name === workflowName) ?? workflows?.[0];
   const start = useStartRuns();
 
@@ -134,6 +137,8 @@ export function RunsPage() {
           Could not start {runCount === 1 ? "the run" : "every run"}: {start.error.message}
         </ErrorMessage>
       )}
+
+      {schedules && schedules.length > 0 && <SchedulesPanel schedules={schedules} />}
 
       <div className="mt-5 mb-3 flex gap-1 overflow-x-auto" role="tablist">
         <Button

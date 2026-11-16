@@ -1,10 +1,9 @@
-import { startWorkers, stopWorkers, store, waitForFinish } from "./harness.ts";
+import { startWorkers, stopWorkers, store, waitForFinish, withoutDeadlocks } from "./harness.ts";
 
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { after, before, test } from "node:test";
-import { sql } from "kysely";
 import { createWorkflowEngine, defineWorkflow } from "../src/index.ts";
 import { db } from "../src/stores/postgres/index.ts";
 import { cancellable, exclusive, pipeline } from "./fixtures/workflows.ts";
@@ -31,25 +30,6 @@ async function waitUntil(check: () => Promise<boolean>, what: string, timeoutMs 
     await sleep(20);
   }
   throw new Error(`Timed out waiting for ${what}`);
-}
-
-/** How many deadlocks Postgres has detected in the test database so far. */
-async function deadlockCount() {
-  const { rows } = await sql<{
-    deadlocks: string;
-  }>`SELECT deadlocks FROM pg_stat_database WHERE datname = current_database()`.execute(db);
-  return Number(rows[0].deadlocks);
-}
-
-/**
- * Runs a race and asserts Postgres detected no deadlock during it. The counter
- * can lag a moment, so it is read again after a pause.
- */
-async function withoutDeadlocks(race: () => Promise<void>) {
-  const before = await deadlockCount();
-  await race();
-  await sleep(1500);
-  assert.equal(await deadlockCount(), before, "Postgres detected a deadlock");
 }
 
 /** A run's row, as the tests check it. */

@@ -29,3 +29,14 @@ export function formatAge({ at, now }: { at: string | null; now: number }) {
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
   return `${Math.floor(seconds / 86400)}d ago`;
 }
+
+/** How long until `now` reaches a time, like "in 5m", or "now" once it has passed. */
+export function formatUntil({ at, now }: { at: string | null; now: number }) {
+  if (!at) return "–";
+  const seconds = Math.round((new Date(at).getTime() - now) / 1000);
+  if (seconds <= 0) return "now";
+  if (seconds < 60) return `in ${seconds}s`;
+  if (seconds < 3600) return `in ${Math.floor(seconds / 60)}m`;
+  if (seconds < 86400) return `in ${Math.floor(seconds / 3600)}h`;
+  return `in ${Math.floor(seconds / 86400)}d`;
+}

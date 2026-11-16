@@ -72,6 +72,13 @@ export interface RunSummary {
   finished_at: string | null;
   steps_total: number;
   steps_done: number;
+  /**
+   * The name of the schedule that started the run. Null for a run started by a
+   * call, or if its schedule has been deleted.
+   */
+  schedule: string | null;
+  /** The time the schedule was due, for a run a schedule started. Null otherwise. */
+  scheduled_for: string | null;
 }
 
 /**
@@ -83,6 +90,57 @@ export interface RunsResponse {
   next_cursor: string | null;
   /** Runs of each status, across all pages. */
   counts: Record<WorkflowRunStatus, number>;
+}
+
+/** A schedule of a workflow, with when it next fires. */
+export interface ScheduleInfo {
+  /** The workflow's name. */
+  workflow: string;
+  /** The workflow's display title from the app's labels, or one made from its name. */
+  workflow_title: string;
+  /** The schedule's name, which is unique among the workflow's schedules. */
+  name: string;
+  /** Five fields, in UTC. Null for a schedule that fires once. */
+  cron: string | null;
+  /** Null once a schedule that fires once has fired. */
+  next_fire_at: string | null;
+  /** Null until it has fired once. */
+  last_fired_at: string | null;
+  /** What each of its runs starts with. */
+  input: unknown;
+  /** When it was paused. Null unless paused. */
+  paused_at: string | null;
+}
+
+/** The schedule a change was made to, returned by the routes that change one. */
+export interface ScheduleRef {
+  workflow: string;
+  name: string;
+}
+
+/**
+ * `POST /schedules` with `{ workflow, name, cron or at, input? }` creates a
+ * schedule and returns `201` with its `{ workflow, name }`. `cron` repeats it;
+ * `at`, an ISO date, fires it once. `400` for an unknown workflow, a cron that
+ * doesn't parse or never fires, an `at` that has passed, or both or neither of
+ * `cron` and `at`; `409` if the workflow already has a schedule with this name.
+ *
+ * `PATCH /schedules/:workflow/:name` with `{ cron?, at?, input? }` changes a
+ * schedule. `400` as above, or for an empty body or one that would switch the
+ * schedule between repeating and firing once; `404` if there is no such
+ * schedule, or it fires once and already has.
+ *
+ * `DELETE /schedules/:workflow/:name` removes a schedule, keeping the runs it
+ * started. `404` if it doesn't exist.
+ *
+ * `POST /schedules/:workflow/:name/pause` and `.../resume` return the schedule's
+ * `{ workflow, name }`. `404` if it doesn't exist; `409` if it is already
+ * paused, or isn't paused.
+ */
+
+/** `GET /schedules`, ordered by workflow, then name. */
+export interface SchedulesResponse {
+  schedules: ScheduleInfo[];
 }
 
 /** A step of a run, with the title and description from the app's labels, or a title made from its name. */
