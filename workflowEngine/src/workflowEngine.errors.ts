@@ -7,7 +7,7 @@ export class NonRetryableError extends Error {
   override name = "NonRetryableError";
 }
 
-/** Thrown by startRun for a name that isn't one of the engine's workflows. No run is created. */
+/** Thrown for a name that isn't one of the engine's workflows, by startRun (no run is created) and by every `engine.schedules` method. */
 export class UnknownWorkflowError extends Error {
   override name = "UnknownWorkflowError";
   readonly workflow: string;
@@ -16,4 +16,14 @@ export class UnknownWorkflowError extends Error {
     super(`Unknown workflow: ${workflow}`);
     this.workflow = workflow;
   }
+}
+
+/**
+ * Thrown by `engine.schedules` when a request can't be a schedule: a cron that
+ * doesn't parse or never fires, an `at` that is invalid or has passed, both or
+ * neither of `cron` and `at`, an empty name, an empty update, or an update that
+ * would turn a repeating schedule into a one-time one or back. Nothing changes.
+ */
+export class InvalidScheduleError extends Error {
+  override name = "InvalidScheduleError";
 }

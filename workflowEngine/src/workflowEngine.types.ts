@@ -246,8 +246,8 @@ export interface WorkflowStore {
    * Saves a schedule of a workflow, named by the workflow's name. With `cron`
    * it repeats, and its first run is at the next tick after now. With `at` it
    * fires once, at that moment. Returns false, saving nothing, if the workflow
-   * already has a schedule with this name. Throws, saving nothing, if `at` is
-   * not after now.
+   * already has a schedule with this name. Throws InvalidScheduleError, saving
+   * nothing, if `at` is not after now.
    */
   createSchedule(request: {
     workflow: string;
@@ -261,7 +261,7 @@ export interface WorkflowStore {
    * to the next tick after now. An `input` alone leaves its next run where it
    * was. An `at` moves a one-time schedule's moment. Returns false, changing
    * nothing, if there is no such schedule, or if it is a one-time schedule that
-   * has already fired. Throws if `cron` is given for a one-time schedule, if
+   * has already fired. Throws InvalidScheduleError if `cron` is given for a one-time schedule, if
    * `at` is given for a repeating one, or if `at` is not after now.
    */
   updateSchedule(request: {
@@ -272,8 +272,9 @@ export interface WorkflowStore {
     input?: unknown;
   }): Promise<boolean>;
   /**
-   * Removes a schedule. The runs it started stay, with their `scheduled_for`
-   * and no schedule. Returns false if there is no such schedule.
+   * Removes a schedule. The runs it started stay, untouched, with their
+   * `scheduled_for` and the schedule's id. Returns false if there is no such
+   * schedule.
    */
   deleteSchedule(request: { workflow: string; name: string }): Promise<boolean>;
   /**
@@ -390,7 +391,7 @@ export interface WorkflowEngine {
    * version of the workflow the firing orchestrator has. A tick starts a run
    * even if the last one is still going, unless `concurrency` prevents it. Every
    * method throws UnknownWorkflowError for a workflow this engine doesn't have,
-   * and an Error for an empty name or a cron that doesn't parse or never fires.
+   * and InvalidScheduleError for a request that can't be a schedule (see that class).
    */
   readonly schedules: {
     /**
@@ -421,7 +422,7 @@ export interface WorkflowEngine {
       at?: Date;
       input?: unknown;
     }): Promise<boolean>;
-    /** Removes a schedule, keeping the runs it started. False if there is no such schedule. */
+    /** Removes a schedule. The runs it started stay, keeping its id. False if there is no such schedule. */
     delete(request: { workflow: string; name: string }): Promise<boolean>;
     /** Stops a schedule from firing; it skips its ticks. False if it is missing or already paused. */
     pause(request: { workflow: string; name: string }): Promise<boolean>;

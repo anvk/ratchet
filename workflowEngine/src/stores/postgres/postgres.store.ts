@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { sql } from "kysely";
+import { InvalidScheduleError } from "../../workflowEngine.errors.ts";
 import { db, type Tx } from "./db/index.ts";
 import {
   ancestors,
@@ -1081,7 +1082,8 @@ async function databaseNow(trx: Tx): Promise<Date> {
 
 /** Throws unless `at` is after `now`: a moment that has passed can't be scheduled. */
 function assertAfterNow({ at, now }: { at: Date; now: Date }) {
-  if (at <= now) throw new Error(`A schedule's \`at\` (${at.toISOString()}) isn't in the future`);
+  if (at <= now)
+    throw new InvalidScheduleError(`A schedule's \`at\` (${at.toISOString()}) isn't in the future`);
 }
 
 /**
@@ -1151,10 +1153,14 @@ async function updateSchedule({
     if (!row) return false;
 
     if (cron !== undefined && row.cron === null) {
-      throw new Error(`Schedule ${workflow}/${name} fires once, so it has no cron to change`);
+      throw new InvalidScheduleError(
+        `Schedule ${workflow}/${name} fires once, so it has no cron to change`,
+      );
     }
     if (at !== undefined && row.cron !== null) {
-      throw new Error(`Schedule ${workflow}/${name} repeats, so it has no \`at\` to change`);
+      throw new InvalidScheduleError(
+        `Schedule ${workflow}/${name} repeats, so it has no \`at\` to change`,
+      );
     }
     if (at !== undefined && row.next_fire_at === null) return false;
 
@@ -1175,7 +1181,7 @@ async function updateSchedule({
   });
 }
 
-/** Removes a schedule, or returns false if it doesn't exist. Its runs stay, their schedule_id set to null. */
+/** Removes a schedule, or returns false if it doesn't exist. Only the schedule's row changes: its runs stay and keep its id as their schedule_id. */
 async function deleteSchedule({
   workflow,
   name,

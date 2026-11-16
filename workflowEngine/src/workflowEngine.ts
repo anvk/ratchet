@@ -7,7 +7,7 @@ import type {
   WorkflowEngineSettings,
   WorkflowStore,
 } from "./workflowEngine.types.ts";
-import { UnknownWorkflowError } from "./workflowEngine.errors.ts";
+import { InvalidScheduleError, UnknownWorkflowError } from "./workflowEngine.errors.ts";
 import { assertCronFires, assertUnique } from "./workflowEngine.utils.ts";
 import { runOrchestrator } from "./workflowEngine.orchestrator.ts";
 import { runWorker } from "./workflowEngine.worker.ts";
@@ -126,22 +126,23 @@ export function createWorkflowEngine({
     clearTimeout(timer);
   }
 
-  /** Throws UnknownWorkflowError, or an Error for an empty name, so nothing reaches the store. */
+  /** Throws UnknownWorkflowError, or InvalidScheduleError for an empty name, so nothing reaches the store. */
   function assertScheduleTarget({ workflow, name }: { workflow: string; name: string }) {
     if (!registry.has(workflow)) throw new UnknownWorkflowError(workflow);
-    if (name.trim() === "") throw new Error("A schedule needs a name");
+    if (name.trim() === "") throw new InvalidScheduleError("A schedule needs a name");
   }
 
   /** Throws unless `at` is a valid date. Whether it is in the future is for the store, which has the database's clock. */
   function assertValidAt(at: Date) {
-    if (Number.isNaN(at.getTime())) throw new Error("A schedule's `at` isn't a valid date");
+    if (Number.isNaN(at.getTime()))
+      throw new InvalidScheduleError("A schedule's `at` isn't a valid date");
   }
 
   const schedules: WorkflowEngine["schedules"] = {
     async create({ workflow, name, cron, at, input }) {
       assertScheduleTarget({ workflow, name });
       if ((cron === undefined) === (at === undefined)) {
-        throw new Error("A schedule needs exactly one of `cron` and `at`");
+        throw new InvalidScheduleError("A schedule needs exactly one of `cron` and `at`");
       }
       if (cron !== undefined) assertCronFires(cron);
       if (at !== undefined) assertValidAt(at);
@@ -150,10 +151,10 @@ export function createWorkflowEngine({
     async update({ workflow, name, cron, at, input }) {
       assertScheduleTarget({ workflow, name });
       if (cron === undefined && at === undefined && input === undefined) {
-        throw new Error("An update needs at least one of `cron`, `at` and `input`");
+        throw new InvalidScheduleError("An update needs at least one of `cron`, `at` and `input`");
       }
       if (cron !== undefined && at !== undefined) {
-        throw new Error("A schedule has either `cron` or `at`, not both");
+        throw new InvalidScheduleError("A schedule has either `cron` or `at`, not both");
       }
       if (cron !== undefined) assertCronFires(cron);
       if (at !== undefined) assertValidAt(at);

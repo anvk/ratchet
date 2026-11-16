@@ -102,8 +102,10 @@ CREATE TABLE workflow_runs (
   -- When the run was given a slot. Null while it waits for one; a run in no
   -- group is admitted when it starts.
   admitted_at timestamptz,
-  -- Set for a run a schedule started: which one, and the tick it was for.
-  schedule_id   uuid REFERENCES schedules (id) ON DELETE SET NULL,
+  -- Set for a run a schedule started: the schedule's id, and the tick it was
+  -- for. Not a foreign key, so that deleting a schedule touches only the
+  -- schedule's row and never locks or updates its runs.
+  schedule_id   uuid,
   scheduled_for timestamptz,
   CHECK ((status = 'failed') = (failure_reason IS NOT NULL)),
   CHECK ((concurrency_key IS NULL) = (concurrency_limit IS NULL)),

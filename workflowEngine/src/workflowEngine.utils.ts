@@ -6,6 +6,7 @@ import {
   type FailureReason,
   type WorkflowRunStatus,
 } from "./workflowEngine.constants.ts";
+import { InvalidScheduleError } from "./workflowEngine.errors.ts";
 import type { StepDefaults, WorkflowEngineSettings } from "./workflowEngine.types.ts";
 
 /** Throws if a name appears more than once. `what` labels the error message. */
@@ -145,7 +146,7 @@ function assertInRange({
   value: number;
 }) {
   if (value < spec.min || value > spec.max) {
-    throw new Error(
+    throw new InvalidScheduleError(
       `Cron "${expression}": ${spec.name} ${value} is out of range ${spec.min}-${spec.max}`,
     );
   }
@@ -162,7 +163,7 @@ function parseStep({
   text: string;
 }) {
   if (!/^\d+$/.test(text) || Number(text) === 0) {
-    throw new Error(
+    throw new InvalidScheduleError(
       `Cron "${expression}": ${spec.name} step "${text}" must be a positive whole number`,
     );
   }
@@ -180,11 +181,13 @@ function parseCronItem({
   item: string;
 }): number[] {
   if (item === "") {
-    throw new Error(`Cron "${expression}": ${spec.name} has an empty item in its list`);
+    throw new InvalidScheduleError(
+      `Cron "${expression}": ${spec.name} has an empty item in its list`,
+    );
   }
   const match = /^(\*|(\d+)(?:-(\d+))?)(?:\/(.*))?$/.exec(item);
   if (!match) {
-    throw new Error(
+    throw new InvalidScheduleError(
       `Cron "${expression}": ${spec.name} "${item}" isn't supported; use *, numbers, ranges, steps and lists`,
     );
   }
@@ -203,7 +206,7 @@ function parseCronItem({
   assertInRange({ expression, spec, value: start });
   assertInRange({ expression, spec, value: end });
   if (start > end) {
-    throw new Error(
+    throw new InvalidScheduleError(
       `Cron "${expression}": ${spec.name} range ${start}-${end} starts after it ends`,
     );
   }
@@ -231,7 +234,7 @@ export function parseCron(expression: string): Cron {
   const texts = expression.trim().split(/\s+/);
   if (texts.length !== 5) {
     const found = expression.trim() === "" ? 0 : texts.length;
-    throw new Error(
+    throw new InvalidScheduleError(
       `Cron "${expression}": found ${found} fields, but five are needed (minute, hour, day of month, month, day of week)`,
     );
   }
@@ -285,7 +288,7 @@ export function nextFireAfter({ cron: expression, after }: { cron: string; after
       return t;
     }
   }
-  throw new Error(`Cron "${expression}" never fires`);
+  throw new InvalidScheduleError(`Cron "${expression}" never fires`);
 }
 
 /** Throws if the expression doesn't parse or never fires. */

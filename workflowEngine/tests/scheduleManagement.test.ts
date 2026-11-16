@@ -267,12 +267,20 @@ test("update returns false for a schedule that doesn't exist, and rejects an upd
   );
 });
 
-test("delete removes a schedule, and its past runs remain without it", async () => {
+test("delete removes a schedule, and its past runs remain with its id", async () => {
   await engine.schedules.create({ workflow: WORKFLOW, name: "mg-delete", cron: "* * * * *" });
   const dueAt = await makeDue("mg-delete");
   assert.equal(await fire(), 1);
   const [run] = await runsOf("mg-delete");
   await waitForFinish([run.id]);
+  const scheduleId = (
+    await db
+      .selectFrom("workflow_runs")
+      .select("schedule_id")
+      .where("id", "=", run.id)
+      .executeTakeFirstOrThrow()
+  ).schedule_id;
+  assert.notEqual(scheduleId, null);
 
   assert.equal(await engine.schedules.delete({ workflow: WORKFLOW, name: "mg-delete" }), true);
 
@@ -282,7 +290,7 @@ test("delete removes a schedule, and its past runs remain without it", async () 
     .select(["schedule_id", "scheduled_for"])
     .where("id", "=", run.id)
     .executeTakeFirstOrThrow();
-  assert.equal(kept.schedule_id, null);
+  assert.equal(kept.schedule_id, scheduleId);
   assert.deepEqual(kept.scheduled_for, dueAt);
 });
 
