@@ -155,8 +155,6 @@ The real query also joins the run's workflow and keeps only versions this worker
 
 So worker 1 gets step A, worker 2 skips A and gets step B, worker 3 gets C, all at the same moment with no waiting. Then, still in that transaction, the worker marks the step **`running`**, records its `worker_id`, bumps its `attempt`, and gives it a **lease**: `lease_expires_at` = now + the step's `leaseMs`.
 
-One test (`engine.test.ts`) starts 40 runs with 6 workers and checks that every step was claimed exactly once. When I removed `SKIP LOCKED` as an experiment, that test failed. That's how we know the lock is doing the work.
-
 The lock only lasts for that claim's transaction, a few milliseconds. From then on, what says "this step belongs to worker 2" is the lease.
 
 ---
@@ -194,7 +192,7 @@ Nobody had to notice the crash. The silence was enough.
 
 **Lost leases count as attempts.** If a step crashes its worker every time (it runs out of memory, say), each lost lease uses up an attempt. When none are left, the orchestrator fails the step instead (`Lost its worker on attempt 3 of 3`), and the run ends like any other failure (section 9). Without that limit, it would keep killing workers forever.
 
-**A worker freezes:** JavaScript runs one thing at a time, and heartbeats are timers. A step doing heavy calculation, like `score-risk`'s simulation, blocks its worker, so **no heartbeat can run until the calculation ends**. From outside, busy and dead look the same. Try the **Risk check overloads its worker** preset: the first attempt of `score-risk` blocks for about 18 seconds, past its 10-second lease.
+**A worker freezes:** JavaScript runs one thing at a time, and heartbeats are timers. A step doing heavy calculation, like `score-risk`'s simulation, blocks its worker, so **no heartbeat can run until the calculation ends**. From outside, busy and dead look the same. Suppose the first attempt of `score-risk` blocks for about 18 seconds, past its 10-second lease.
 
 ```
 0s    worker-3 claims score-risk and starts an 18-second calculation
@@ -229,7 +227,7 @@ The worker calls the step's `run` function, renewing its lease while it runs. Th
 3. leaves every other step alone: steps already running finish, and steps whose needs are met still start;
 4. once nothing in the run can move any more, marks the run **`failed`**, with the reason of the step that failed first.
 
-Here's the payment run with the "Sanctions match" preset, as you've seen in the dashboard:
+Here's a payment run where the sanctions check finds a match:
 
 ```
 receive-payment   ✅ succeeded
@@ -272,8 +270,6 @@ Whoever goes second sees the first one's work, so the step that needs both is re
 
 The same lock covers the other run-wide decision: "nothing can move any more, so the run is finished". Two branches ending at the same moment would otherwise each see the other still running, and the run would never be marked done. It also has to be taken in the same order everywhere, the run first and then its steps (with a concurrency group's lock in between, section 13), or two transactions could each hold the lock the other wants and wait forever (a **deadlock**). That's why the orchestrator's sweep locks the run before the expired step, too. (The one exception is claiming a run's very first step, which marks the run `running` while already holding the step. That claim never waits for the run's lock; section 11 explains why it mustn't.)
 
-A test (`dependencies.test.ts`) runs 120 diamond-shaped runs whose two branches finish together. With the lock, every join runs exactly once. With the lock removed, some runs get stuck every time, and the test fails.
-
 **Sticky claiming with branches:** when a worker's step readies two steps at once, the worker keeps the first and leaves the other for someone else (section 14).
 
 ---
@@ -294,15 +290,15 @@ Most failures in real systems are temporary: a timeout, a dropped connection, a 
 1.5s   attempt 3 claimed     the vendor answers → step_succeeded
 ```
 
-While it waits, the step is `ready` with `ready_at` in the future, so no worker can claim it yet (section 6). The dashboard shows it as **Retrying**. Try the **Flaky sanctions vendor** preset to watch it happen.
+While it waits, the step is `ready` with `ready_at` in the future, so no worker can claim it yet (section 6). The dashboard shows it as **Retrying**.
 
 **Not every error should be retried.** "Insufficient funds" or "Sanctions list match" won't change if you ask again. A step throws a **`NonRetryableError`** for those, and the run fails at once. The payment workflow turns every decline from the payment service into one.
 
-**Every step has a limit.** After `maxAttempts` (3 unless the step sets its own), the step fails for good and the run fails with it (section 9). Errors and lost leases both use up attempts. Try the **Sanctions vendor down** preset: the vendor times out on all 4 attempts.
+**Every step has a limit.** After `maxAttempts` (3 unless the step sets its own), the step fails for good and the run fails with it (section 9). Errors and lost leases both use up attempts.
 
 **A step can be stuck without failing.** Everything above starts with a step that throws. A vendor that never answers doesn't throw: the step just waits. Its worker is fine, so heartbeats keep going and the lease keeps renewing (section 7). A lease only proves the **worker** is alive, not that the **step** is getting anywhere. Left alone, the step would run forever, and in a concurrency group it would keep its run's slot forever too (section 13).
 
-So a step can set **`timeoutMs`**, a limit on one attempt. When it passes, the worker fires `ctx.signal`, stops waiting for the step, and records the attempt as failed with the error `Timed out after 6000ms`. From there it's an ordinary failed attempt: it waits out its backoff and runs again, and it counts towards `maxAttempts`. Try the **Sanctions vendor hangs** preset:
+So a step can set **`timeoutMs`**, a limit on one attempt. When it passes, the worker fires `ctx.signal`, stops waiting for the step, and records the attempt as failed with the error `Timed out after 6000ms`. From there it's an ordinary failed attempt: it waits out its backoff and runs again, and it counts towards `maxAttempts`. Here is a sanctions check whose vendor doesn't answer the first time:
 
 ```
 0.0s   attempt 1 claimed     the vendor never answers
@@ -328,7 +324,7 @@ The dashboard shows the reason next to the Failed badge.
 
 **Resuming a failed run (redrive).** Once you've fixed the cause, you don't have to start again from the beginning. `redriveRun` (the **Resume run** button on the run page) puts the run back to `running`: every step that didn't succeed goes back to `pending`, those whose needs have already succeeded become `ready`, and steps that succeeded keep their outputs and never run again. It's offered for every reason except `non_retryable`, where asking again won't change a decision, and for a run that was cancelled (below).
 
-The resumed steps get **fresh attempts**, but their attempt numbers keep counting up: attempt 5, not attempt 1. The ownership check (section 8) matches on the attempt number, so if it started again from 1, a worker that lost its lease before the run failed, and is somehow still running, could match a new attempt and save a stale result. Instead, `prior_attempts` remembers where the redrive happened, and `maxAttempts` counts only the attempts after it. Try **Sanctions vendor down**, then press **Resume run**: the simulated vendor has "recovered", so attempt 5 succeeds and the payment posts.
+The resumed steps get **fresh attempts**, but their attempt numbers keep counting up: attempt 5, not attempt 1. The ownership check (section 8) matches on the attempt number, so if it started again from 1, a worker that lost its lease before the run failed, and is somehow still running, could match a new attempt and save a stale result. Instead, `prior_attempts` remembers where the redrive happened, and `maxAttempts` counts only the attempts after it.
 
 **Cancelling a run.** Sometimes you want a run to stop: it was started by mistake, or it's stuck and holding its group's slot (section 13). `cancelRun` (the **Cancel run** button on the run page) stops any run that hasn't finished, in one transaction:
 
@@ -370,8 +366,6 @@ The cancel then waits for the worker's claim to commit, and fails the step it ju
 
 Cancelling a run that is **waiting for a slot** had the same problem with the group lock: the cancel holds the run and wants the group, while a run finishing in that group holds the group and wants the waiting run, to admit it. So admission (section 13) picks and locks its candidate in one query and passes over one that's locked. A locked waiting run is one being cancelled, and the next in line should get the slot anyway.
 
-Two tests (`cancel.test.ts`) aim cancels at the moments this goes wrong: 40 runs at a time cancelled just as workers claim them, and waiting runs cancelled just as their slot frees up. They also read Postgres's own count of deadlocks, and it mustn't move.
-
 ---
 
 ## 12. Idempotency keys: protecting against duplicates
@@ -385,7 +379,7 @@ Leases and retries both mean a step can run **more than once**: in the freeze ex
 
 In the freeze example, running `score-risk` twice was harmless because it only calculates. `post-ledger` is different: it writes money movements.
 
-**The double charge.** Try the **Ledger write times out** preset. `post-ledger`'s first attempt writes the debit and credit, then its reply "times out", so the step throws. From the worker's side, it can't tell the write worked. The engine does the right thing and retries, and attempt 2 writes the ledger **again**:
+**The double charge.** Suppose `post-ledger`'s first attempt writes the debit and credit, then its reply times out, so the step throws. From the worker's side, it can't tell the write worked. The engine does the right thing and retries, and attempt 2 writes the ledger **again**:
 
 ```
 debit  957.76     ← attempt 1
@@ -413,7 +407,7 @@ Everything so far keeps **one run** correct. Some bugs only appear when **two ru
 
 Each run did everything right. The run lock (section 10) can't help, because it only covers one run. Idempotency keys (section 12) can't either: they stop the same thing happening twice, not two different things happening at once. The two runs simply mustn't overlap.
 
-(The demo's balances are simulated, so it never actually goes below zero. The preset at the end of this section shows the queueing.)
+(The demo's balances are simulated, so it never actually goes below zero.)
 
 **Declaring a group.** A workflow can say which runs must not overlap:
 
@@ -453,11 +447,7 @@ An **advisory lock** locks a number instead of a row, so a group needs no row of
 
 It fits into the lock order from section 10: **run, then group, then steps.** Finishing a run already holds that run's lock, then takes its group's. Starting a run holds no run lock yet, because the run is new. And the only runs locked while the group lock is held are waiting ones. Just one other thing can hold a waiting run, a cancel, so admission skips a waiting run that's locked instead of waiting for it (section 11).
 
-Two tests (`concurrency.test.ts`) start 20 runs of one group at the same moment, with limits of 1 and 2, then check from `admitted_at` and `finished_at` that no more than the limit were ever in progress together. With the group lock removed, the race shows up both ways it can. Runs overlap: 10 or 11 at once against a limit of 2, every time. And runs get stuck waiting for good: two runs finishing together can each see the other still holding its slot, so neither admits anyone, the join problem again.
-
 **Redrive goes through admission too.** A run that failed or was cancelled gave its slot back. Redriving it (section 11) puts it back in line: it's `queued` again, admitted at once if there's a free slot, and otherwise it waits like a new run. Without that, redrive would be a way around the limit. It keeps its original start time, so it goes ahead of runs that started waiting after it.
-
-**Try it:** pick the **Payments from one account (one at a time)** preset with **× 5**. One payment runs and four wait as Queued; each one's event list shows `run_waiting`, then `run_admitted` when its turn comes.
 
 ---
 
@@ -498,7 +488,7 @@ interface WorkflowStore {
 }
 ```
 
-`createPostgresStore()` is one implementation of it. You could write a file-based or SQLite store with the same ten methods, and the engine and workers wouldn't change. The shutdown tests already do this with a fake in-memory store.
+`createPostgresStore()` is one implementation of it. You could write a file-based or SQLite store with the same ten methods, and the engine and workers wouldn't change.
 
 `failStep` decides between a retry and a final failure in one transaction, using the step's retry policy from the plan. The run lock (section 10) and the group lock (section 13) are the store's business too: the interface only promises that two steps finishing at once ready a step that needs both exactly once, and that a group never has more than its limit in progress, and each store keeps those promises its own way. Leases are part of the same interface on purpose: the ownership check has to happen in the same transaction that saves a step's result, so leases must live wherever step state lives.
 
@@ -535,24 +525,3 @@ interface WorkflowStore {
 - **A cancelled step isn't stopped either.** Its worker hears at its next heartbeat, up to a third of the lease later, and the step's function only stops if it honours `ctx.signal`.
 
 All eight are listed in `workflowEngine/guarantees.md`.
-
----
-
-**A good way to learn it:** read the files in this order:
-
-1. `workflows/greeting/workflow.ts` (the simplest workflow);
-2. `workflowEngine.worker.ts` (the loop, the heartbeats, the time limit, and deciding whether an error can be retried);
-3. `workflowEngine.orchestrator.ts` (the sweep);
-4. `claimStep`, `completeStep` (with `lockRun` and `readyUnblockedSteps`), `failStep`, `extendLease`, `sweepExpiredLeases`, `redriveRun` and `cancelRun` in `postgres.store.ts` (the database side);
-5. `startRun` and `admitWaitingRuns` (with `lockGroup`) in the same file (concurrency groups).
-
-Keep the dashboard open while you start a run, and you can watch each part of this happen live in the event list. These presets show the rest:
-
-- **Payment clears:** the two checks run side by side on two workers, and `post-ledger` waits for both;
-- **Sanctions match:** a check fails, `post-ledger` (which needs it) is skipped, and the risk check alongside still finishes before the run fails;
-- **Risk check overloads its worker:** a lease expires and another worker takes over;
-- **Flaky sanctions vendor:** a step fails twice, waits, and succeeds on attempt 3;
-- **Sanctions vendor hangs:** a step that never returns is cut off after 6 seconds, and its retry succeeds;
-- **Sanctions vendor down:** a step fails on every attempt, and the run fails as "Out of attempts"; press **Resume run** to redrive it;
-- **Ledger write times out:** the retry that would charge twice, and the unique key that stops it;
-- **Payments from one account (one at a time):** start several, and they queue and run one after another. Press **Cancel run** on the one that's running, and the next starts at once.
