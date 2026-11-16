@@ -211,9 +211,11 @@ await engine.runWorker();
 await engine.close();
 ```
 
-**One orchestrator** gives a step to another worker when its worker stops
-sending heartbeats, for example because it crashed, and starts a run each time
-a schedule is due. It starts runs, so it calls `sync()` too.
+**One orchestrator**, which must be running: it is the only process that
+recovers lost steps and fires schedules. It gives a step to another worker
+when its worker stops sending heartbeats, for example because it crashed, and
+starts a run each time a schedule is due. It starts runs, so it calls `sync()`
+too.
 
 ```ts
 // orchestrator.ts

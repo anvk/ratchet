@@ -177,7 +177,7 @@ A lease works the same way for a step:
 
 ## 8. The orchestrator: when a worker goes silent
 
-The orchestrator (`workflows/orchestrator.ts`) is a separate process running a loop. It has two jobs: this section's, and starting scheduled runs (section 15). Every second (`sweepIntervalMs`) it **sweeps**: it looks for `running` steps whose lease has expired, makes each one **`ready`** again, clears its worker, and writes a `step_lease_expired` event. The next worker that asks claims it as **attempt 2**.
+The orchestrator (`workflows/orchestrator.ts`) is a separate process running a loop. It has two jobs: this section's, and starting scheduled runs (section 15). Workers do neither, so an orchestrator has to be running: without one, a step whose worker went silent stays `running`, and no schedule fires. Every second (`sweepIntervalMs`) it **sweeps**: it looks for `running` steps whose lease has expired, makes each one **`ready`** again, clears its worker, and writes a `step_lease_expired` event. The next worker that asks claims it as **attempt 2**.
 
 **A worker crashes:**
 
@@ -637,11 +637,8 @@ interface WorkflowStore {
 ## What it doesn't handle yet
 
 - **A retry repeats whatever the failed attempt already did,** unless the step makes it safe to repeat (section 12). The engine can't do that for you.
-- **A failed run takes as long as its slowest independent step.** Steps that don't depend on the failed one finish first, so the caller hears "failed" later than it could.
 - **The engine can't tell when a step's code changes.** If you edit the code inside `run` and leave the workflow's `version` as it was, old and new workers both claim the same runs.
-- **Lost leases need the orchestrator:** if it isn't running, steps whose worker went silent stay `running`.
-- **A run that never finishes keeps its slot.** A run whose steps no worker can claim, say because no worker has its version, stays in progress, and every run waiting behind it in its group waits too, until someone cancels it.
 - **A timed-out step isn't stopped.** The worker stops waiting for it, but unless the step honours `ctx.signal` its function keeps running in the background, and may overlap with its own retry.
 - **A cancelled step isn't stopped either.** Its worker hears at its next heartbeat, up to a third of the lease later, and the step's function only stops if it honours `ctx.signal`.
 
-All seven are listed in `workflowEngine/guarantees.md`.
+All four are listed in `workflowEngine/guarantees.md`.
