@@ -366,6 +366,8 @@ The cancel then waits for the worker's claim to commit, and fails the step it ju
 
 Cancelling a run that is **waiting for a slot** had the same problem with the group lock: the cancel holds the run and wants the group, while a run finishing in that group holds the group and wants the waiting run, to admit it. So admission (section 13) picks and locks its candidate in one query and passes over one that's locked. A locked waiting run is one being cancelled, and the next in line should get the slot anyway.
 
+**And if a deadlock happens anyway?** Postgres never hangs on one. After a second it aborts one of the transactions involved, and the other carries on. The store runs the aborted transaction again, up to three times, after a short random wait so the two don't collide in step. That's safe because the aborted transaction was rolled back completely: the second try starts from nothing. So a deadlock nobody thought of costs a moment's delay rather than a failed cancel, and each retry is logged, so it doesn't go unnoticed.
+
 ---
 
 ## 12. Idempotency keys: protecting against duplicates
