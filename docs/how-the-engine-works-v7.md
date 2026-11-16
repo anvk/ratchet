@@ -82,12 +82,12 @@ The schema (`workflowEngine/src/stores/postgres/schema.sql`) has two groups of t
 | ------------------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **The plan** (the recipe)             | `workflows`     | One row per version of a workflow                                                                                                                                  |
 |                                       | `steps`         | The steps in each version, with each step's `needs`, `lease_ms`, `max_attempts` and `backoff_ms`                                                                   |
-|                                       | `schedules`     | One row per schedule: a workflow to start, when, and with what input (section 16)                                                                                  |
+|                                       | `schedules`     | One row per schedule: a workflow to start, when, and with what input (section 15)                                                                                  |
 | **The execution** (tonight's cooking) | `workflow_runs` | One row each time someone starts a workflow, with its concurrency group and when it was admitted (section 13)                                                      |
 |                                       | `step_runs`     | Progress of each step in that run, with its `needs` copied from the plan: **this is the to-do list workers pick from**. A running step also has `lease_expires_at` |
 |                                       | `events`        | A diary of everything that happened, never edited                                                                                                                  |
 
-On startup, the API calls `engine.sync()`, which copies each workflow's plan into `workflows` and `steps`. The orchestrator's process calls it too before it starts its loop, because it starts runs as well (section 16). If you edit a workflow, say by renaming a step or changing what it needs, its lease or its retries, it gets a **new version row**. Old runs keep pointing at the version they started with, so the dashboard still shows them correctly.
+On startup, the API calls `engine.sync()`, which copies each workflow's plan into `workflows` and `steps`. The orchestrator's process calls it too before it starts its loop, because it starts runs as well (section 15). If you edit a workflow, say by renaming a step or changing what it needs, its lease or its retries, it gets a **new version row**. Old runs keep pointing at the version they started with, so the dashboard still shows them correctly.
 
 **Workers only claim runs of a version they have.** During a deploy, old and new workers run side by side. Without this, an old worker could pick up a step of a run started on the new version, and run it with old code against a new plan. Each worker knows the versions of its own workflows, and the claim query (section 6) only matches those, so old workers finish old runs and new workers take new ones.
 
@@ -176,7 +176,7 @@ A lease works the same way for a step:
 
 ## 8. The orchestrator: when a worker goes silent
 
-The orchestrator (`workflows/orchestrator.ts`) is a separate process running a loop. It has two jobs: this section's, and starting scheduled runs (section 16). Every second (`sweepIntervalMs`) it **sweeps**: it looks for `running` steps whose lease has expired, makes each one **`ready`** again, clears its worker, and writes a `step_lease_expired` event. The next worker that asks claims it as **attempt 2**.
+The orchestrator (`workflows/orchestrator.ts`) is a separate process running a loop. It has two jobs: this section's, and starting scheduled runs (section 15). Every second (`sweepIntervalMs`) it **sweeps**: it looks for `running` steps whose lease has expired, makes each one **`ready`** again, clears its worker, and writes a `step_lease_expired` event. The next worker that asks claims it as **attempt 2**.
 
 **A worker crashes:**
 
@@ -271,7 +271,7 @@ Whoever goes second sees the first one's work, so the step that needs both is re
 
 The same lock covers the other run-wide decision: "nothing can move any more, so the run is finished". Two branches ending at the same moment would otherwise each see the other still running, and the run would never be marked done. It also has to be taken in the same order everywhere, the run first and then its steps (with a concurrency group's lock in between, section 13), or two transactions could each hold the lock the other wants and wait forever (a **deadlock**). That's why the orchestrator's sweep locks the run before the expired step, too. (The one exception is claiming a run's very first step, which marks the run `running` while already holding the step. That claim never waits for the run's lock; section 14 explains why it mustn't.)
 
-**Sticky claiming with branches:** when a worker's step readies two steps at once, the worker keeps the first and leaves the other for someone else (section 17).
+**Sticky claiming with branches:** when a worker's step readies two steps at once, the worker keeps the first and leaves the other for someone else (section 16).
 
 ---
 
@@ -454,37 +454,11 @@ The cancel then waits for the worker's claim to commit, and fails the step it ju
 
 Cancelling a run that is **waiting for a slot** had the same problem with the group lock: the cancel holds the run and wants the group, while a run finishing in that group holds the group and wants the waiting run, to admit it. So admission (section 13) picks and locks its candidate in one query and passes over one that's locked. A locked waiting run is one being cancelled, and the next in line should get the slot anyway.
 
-These are the deadlocks that were found. Section 15 covers what happens if there is one that wasn't.
+These are the deadlocks that were found. If two transactions ever do deadlock, Postgres aborts one of them with an error and undoes everything it did. The engine doesn't run it again: the operation fails, so the mistake in the lock order gets noticed.
 
 ---
 
-## 15. Deadlocks: when two transactions wait for each other
-
-A **deadlock** is two transactions that each hold something the other needs:
-
-```
-cancel:  holds the run,   wants the step
-worker:  holds the step,  wants the run
-```
-
-Neither can move, and neither is doing anything wrong. They arrived in the same few milliseconds, in an unlucky order.
-
-**The engine avoids them with one lock order.** A deadlock needs a circle of waiting. If every transaction takes its locks in the same order, there can't be one, because nobody ever holds a later lock while waiting for an earlier one. The engine's order is **run, then group, then steps** (sections 10 and 13), with a schedule's row before all of them (section 16). The few places that can't follow it never wait instead: a run's first claim and the admission of a waiting run both skip a row that's locked (section 14).
-
-**Is a deadlock expected?** It isn't expected, but it isn't impossible. The lock order rules out every deadlock that is known about, so in normal running there are none. What it can't rule out is a mistake. The order is kept by care, not enforced by anything: one piece of code that takes two locks the other way round creates a deadlock, and it only shows when two transactions meet at the wrong moment.
-
-**If one happens, Postgres breaks it.** Postgres never lets a deadlock hang. After a second of waiting it looks for a circle, and if it finds one it aborts one of the transactions with the error `deadlock detected`, undoes everything that transaction did, and lets the other carry on. Nothing is left half done: the aborted transaction's changes and its events are all gone together.
-
-**The engine does not try again by itself.** The error goes to whoever asked:
-
-- **A worker** logs it, waits a second (`errorBackoffMs`) and goes back to its loop. If it was claiming a step, the step is still there to claim. If it was saving a step's result, the result is lost, the step's lease runs out, and the step runs again (section 8).
-- **A call such as `cancelRun` or `startRun`** fails, and the caller sees the error. Calling it again works.
-
-**Why not retry it automatically?** A retry would usually succeed: by the time the aborted transaction ran again, the other one would have finished. But a deadlock means the lock order has a hole, and a retry would turn that into a line in a log that nobody reads. A failed operation gets noticed, and then the hole gets found and closed. The cost is small, because nothing is lost or left inconsistent, so the engine prefers the mistake to be visible.
-
----
-
-## 16. Schedules: starting runs by the clock
+## 15. Schedules: starting runs by the clock
 
 A run can start because something calls `startRun`, or because the clock says it's time. For the second you create a **schedule**:
 
@@ -499,9 +473,7 @@ await engine.schedules.create({
 
 A schedule belongs to a workflow and has a **name**, the **input** its runs start with, and a time. A workflow can have any number of them, each with its own input.
 
-**It repeats, or it fires once.** A repeating schedule has a **cron expression**. It's the usual five fields, minute, hour, day of month, month and day of week, read in **UTC**: `0 2 * * *` is two o'clock every night, `*/15 * * * *` every quarter of an hour, `0 9 * * 1-5` nine o'clock on weekdays. Each field takes `*`, a number, a range (`1-5`), a step (`*/15`) or a list of those. An expression that can't be read, or one that never comes round, such as the 31st of February, is rejected.
-
-One rule of cron surprises people. When both day fields are set, a day matches if **either** does: `0 0 13 * 5` is every Friday and every 13th, not only a Friday the 13th.
+**It repeats, or it fires once.** A repeating schedule has a **cron expression**: the usual five fields, read in **UTC**. `0 2 * * *` is two o'clock every night, and `*/15 * * * *` is every quarter of an hour. An expression that can't be read, or that never comes round, is rejected.
 
 A one-time schedule has a moment, `at`, in place of the expression:
 
@@ -514,9 +486,9 @@ await engine.schedules.create({
 });
 ```
 
-It starts one run at that moment and never another. Its row stays afterwards, with nothing left to fire, so you can see that it ran. A moment that has already passed is rejected: to start a run now, call `startRun`. A schedule keeps its kind, so turning one into the other means deleting it and creating it again.
+It starts one run at that moment, and its row stays afterwards with nothing left to fire. A moment that has already passed is rejected. A schedule can't change from one kind to the other.
 
-**A schedule is a row, not part of the workflow.** A step's `needs` belong in the code, because the code is what they describe. When a workflow runs, and with what input, is something you want to change while everything is running: add a report for a new customer, hold one back during an incident. So a schedule lives in the `schedules` table and nowhere else, and it is created and changed through the engine:
+**A schedule is a row, not part of the workflow.** When a workflow runs, and with what input, changes while everything is running, so a schedule lives only in the `schedules` table and is created and changed through the engine:
 
 | Call                      | What it does                                          | Returns `false` when                                            |
 | ------------------------- | ----------------------------------------------------- | --------------------------------------------------------------- |
@@ -580,11 +552,11 @@ An update or a resume locks the same row, so an edit and a firing take turns: th
 
 That also answers what happens when a run takes longer than the gap between ticks: the next tick starts another run alongside it. A workflow that mustn't overlap with itself says so with `concurrency`, and its scheduled runs then queue like any others.
 
-**Where the lock fits.** When a schedule fires, its row is locked before anything else, and the run is then started under it in the usual way (section 13). Nothing that holds a run or a group ever needs a schedule, so this lock can't be part of a circle (section 15).
+**Where the lock fits.** When a schedule fires, its row is locked before anything else, and the run is then started under it in the usual way (section 13). Nothing that holds a run or a group ever needs a schedule, so firing a schedule can't deadlock with them.
 
 ---
 
-## 17. Claim order: which step a worker picks next
+## 16. Claim order: which step a worker picks next
 
 When several steps are ready, which one does a worker take? That's the `claimOrder` setting (`workflows/engine.ts`):
 
@@ -596,7 +568,7 @@ Every step is still saved separately, with its own lease, in all three modes. `s
 
 ---
 
-## 18. Shutting down gracefully
+## 17. Shutting down gracefully
 
 When you press Ctrl+C on a worker (`closeOnSignals`):
 
@@ -608,7 +580,7 @@ In the last two cases the step it abandoned keeps its lease until the lease runs
 
 ---
 
-## 19. The store interface: why Postgres is swappable
+## 18. The store interface: why Postgres is swappable
 
 The engine never writes SQL itself. It only talks to a `WorkflowStore` interface (`workflowEngine.types.ts`):
 
@@ -630,7 +602,7 @@ interface WorkflowStore {
 
 ---
 
-## 20. The whole picture
+## 19. The whole picture
 
 ```
  Dashboard ──HTTP──▶ API ──startRun──▶ ┌────────────────── Postgres ─────────────────┐
