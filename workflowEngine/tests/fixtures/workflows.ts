@@ -20,6 +20,7 @@ function step(name: string, value: (outputs: Record<string, { total: number }>) 
 /** Three steps, each adding one to the previous step's output. */
 export const pipeline = defineWorkflow<PipelineInput>({
   name: "pipeline",
+  version: "1",
   steps: [
     step("first", () => 1),
     step("second", (outputs) => outputs.first.total + 1),
@@ -40,6 +41,7 @@ interface SlowInput {
  */
 export const slow = defineWorkflow<SlowInput>({
   name: "slow",
+  version: "1",
   steps: [
     {
       name: "work",
@@ -71,6 +73,7 @@ interface FlakyInput {
 /** A step that fails its first few attempts, with quick retries, between two plain steps. */
 export const flaky = defineWorkflow<FlakyInput>({
   name: "flaky",
+  version: "1",
   steps: [
     {
       name: "prepare",
@@ -98,6 +101,7 @@ export const flaky = defineWorkflow<FlakyInput>({
 /** A step that blocks its worker past its lease on every attempt, like one that keeps crashing it. */
 export const doomed = defineWorkflow({
   name: "doomed",
+  version: "1",
   steps: [
     {
       name: "hog",
@@ -141,6 +145,7 @@ function branch(name: "left" | "right") {
 /** start, then left and right side by side, then join once both are done. tail only needs right. */
 export const diamond = defineWorkflow<DiamondInput>({
   name: "diamond",
+  version: "1",
   steps: [
     { name: "start", run: async () => ({ n: 1 }) },
     branch("left"),
@@ -184,6 +189,7 @@ const groupStep = {
 /** Runs of one group go one at a time. */
 export const exclusive = defineWorkflow<GroupInput>({
   name: "exclusive",
+  version: "1",
   concurrency: { key: (input) => input.group ?? null, limit: 1 },
   steps: [groupStep],
 });
@@ -191,6 +197,7 @@ export const exclusive = defineWorkflow<GroupInput>({
 /** Runs of one group go two at a time. */
 export const paired = defineWorkflow<GroupInput>({
   name: "paired",
+  version: "1",
   concurrency: { key: (input) => input.group ?? null, limit: 2 },
   steps: [groupStep],
 });
@@ -203,6 +210,7 @@ interface StallingInput {
 /** One step with a time limit, whose first attempts can hang until they are timed out. */
 export const stalling = defineWorkflow<StallingInput>({
   name: "stalling",
+  version: "1",
   steps: [
     {
       name: "call",
@@ -232,6 +240,7 @@ interface CancellableInput {
 /** A short-leased step that can be cancelled while it runs, then a step that returns at once. */
 export const cancellable = defineWorkflow<CancellableInput>({
   name: "cancellable",
+  version: "1",
   steps: [
     {
       name: "work",
@@ -253,6 +262,7 @@ export const cancellable = defineWorkflow<CancellableInput>({
 /** One quick step returning its input, for the schedule tests to start on a schedule. */
 export const scheduled = defineWorkflow<{ from?: string }>({
   name: "scheduled",
+  version: "1",
   steps: [{ name: "only", run: async (ctx) => ctx.input }],
 });
 
@@ -264,6 +274,7 @@ interface ScheduledExclusiveInput {
 /** A workflow for the schedule tests whose runs go one at a time. */
 export const scheduledExclusive = defineWorkflow<ScheduledExclusiveInput>({
   name: "scheduled-exclusive",
+  version: "1",
   concurrency: { key: () => "scheduled-exclusive", limit: 1 },
   steps: [
     {

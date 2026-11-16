@@ -18,7 +18,7 @@ after(() => stopWorkers());
  * the store saw. `engineTimeoutMs` is the engine's setting, for steps without their own.
  */
 async function runOnce(step: Omit<StepDefinition, "name">, engineTimeoutMs = 60_000) {
-  const wf = defineWorkflow({ name: "timed", steps: [{ name: "timed", ...step }] });
+  const wf = defineWorkflow({ name: "timed", version: "1", steps: [{ name: "timed", ...step }] });
   const { store: fake, calls } = fakeStore({ workflow: "timed" });
   const engine = createWorkflowEngine({
     workflows: [wf],
@@ -195,6 +195,7 @@ test("defineWorkflow rejects a timeoutMs that isn't a whole, positive number", (
   const define = (timeoutMs: number) =>
     defineWorkflow({
       name: "timeout-bad",
+      version: "1",
       steps: [{ name: "only", timeoutMs, run: async () => null }],
     });
   for (const timeoutMs of [0, -1, 1.5]) {
@@ -209,6 +210,7 @@ test("changing a step's timeoutMs does not create a new version", async () => {
   const withTimeout = (timeoutMs: number) =>
     defineWorkflow({
       name: "timeout-versioned",
+      version: "1",
       steps: [{ name: "only", timeoutMs, run: async () => null }],
     });
   await createWorkflowEngine({

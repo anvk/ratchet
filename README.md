@@ -51,7 +51,9 @@ to show it running; none of the demo is needed to use the engine.
 ### Define a workflow
 
 A workflow is a list of named steps. Each step is an async function, and
-`needs` says which steps must succeed before it starts:
+`needs` says which steps must succeed before it starts. `version` is any text
+you choose; change it when you change what a step's code does, so workers with
+the old code and the new never share a run:
 
 ```ts
 // stockReport.ts
@@ -63,6 +65,7 @@ export interface StockReportInput {
 
 export default defineWorkflow<StockReportInput>({
   name: "stock-report",
+  version: "1",
   steps: [
     {
       name: "fetch-prices",
@@ -122,6 +125,7 @@ and the rest wait, oldest first. A `null` key puts a run in no group:
 ```ts
 export default defineWorkflow<StockReportInput>({
   name: "stock-report",
+  version: "1",
   concurrency: { key: (input) => `ticker:${input.ticker}`, limit: 1 }, // one report per ticker at a time
   steps: [
     // ...as above
@@ -245,14 +249,14 @@ dashboard on top.
 
 ## Data model
 
-| Table           | Holds                                                   |
-| --------------- | ------------------------------------------------------- |
-| `workflows`     | One row per version of a workflow                       |
-| `steps`         | The steps in each workflow version                      |
-| `schedules`     | One row per schedule, with when it next fires           |
-| `workflow_runs` | One row each time a workflow is started                 |
-| `step_runs`     | Progress of each step in a run; workers claim from here |
-| `events`        | Append-only history of every state change               |
+| Table           | Holds                                                                   |
+| --------------- | ----------------------------------------------------------------------- |
+| `workflows`     | One row per version of a workflow, with its `version`                   |
+| `steps`         | The steps in each workflow version                                      |
+| `schedules`     | One row per schedule, with when it next fires                           |
+| `workflow_runs` | One row each time a workflow is started, with the version it started on |
+| `step_runs`     | Progress of each step in a run; workers claim from here                 |
+| `events`        | Append-only history of every state change                               |
 
 The full definition is in
 [`workflowEngine/src/stores/postgres/schema.sql`](workflowEngine/src/stores/postgres/schema.sql). TypeScript types

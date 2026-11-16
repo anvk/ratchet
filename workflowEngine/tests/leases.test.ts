@@ -99,6 +99,7 @@ test("a step's own leaseMs wins over the default, and the sticky handoff gets a 
   // Unknown to the worker processes, so this test can claim it itself.
   const leased = defineWorkflow({
     name: "leased",
+    version: "1",
     steps: [
       {
         name: "own",
@@ -146,6 +147,7 @@ test("a step's own leaseMs wins over the default, and the sticky handoff gets a 
 test("a swept step can't be renewed or finished by the worker that lost it", async () => {
   const lost = defineWorkflow({
     name: "lost",
+    version: "1",
     steps: [{ name: "only", run: async () => null }],
   });
   await store.syncWorkflows([lost]);
@@ -190,6 +192,7 @@ test("defineWorkflow rejects a leaseMs that isn't a whole, positive number", () 
       () =>
         defineWorkflow({
           name: "bad",
+          version: "1",
           steps: [{ name: "only", leaseMs, run: async () => null }],
         }),
       /needs a whole, positive leaseMs/,

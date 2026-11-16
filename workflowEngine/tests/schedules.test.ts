@@ -8,6 +8,7 @@ import { fakeStore } from "./fakeStore.ts";
 
 const report = defineWorkflow({
   name: "report",
+  version: "1",
   steps: [{ name: "build", run: async () => {} }],
 });
 

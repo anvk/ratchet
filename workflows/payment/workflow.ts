@@ -65,6 +65,7 @@ function simulationFor(ctx: StepContext<PaymentInput>) {
 
 export default describeWorkflow<PaymentInput>({
   name: "payment",
+  version: "1",
   title: "Process a payment",
   description:
     "Takes a fake payment through account checks, runs the risk and sanctions checks side by side, then posts it to the ledger.",

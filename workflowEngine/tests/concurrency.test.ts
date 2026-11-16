@@ -18,6 +18,7 @@ interface GroupedInput {
 /** A one-step workflow that groups runs by input.group, two at a time. */
 const grouped = defineWorkflow<GroupedInput>({
   name: "concurrency-grouped",
+  version: "1",
   concurrency: { key: (input) => input.group ?? null, limit: 2 },
   steps: [{ name: "only", run: async () => null }],
 });
@@ -45,6 +46,7 @@ test("defineWorkflow rejects a concurrency limit that isn't a whole, positive nu
   const define = (limit: number) =>
     defineWorkflow({
       name: "concurrency-bad",
+      version: "1",
       concurrency: { key: () => "a", limit },
       steps: [{ name: "only", run: async () => null }],
     });
@@ -81,6 +83,7 @@ test("changing a workflow's concurrency limit does not create a new version", as
   const withLimit = (limit: number) =>
     defineWorkflow({
       name: "concurrency-versioned",
+      version: "1",
       concurrency: { key: () => "a", limit },
       steps: [{ name: "only", run: async () => null }],
     });
