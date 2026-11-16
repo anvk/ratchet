@@ -1,24 +1,10 @@
 import { InvalidScheduleError, UnknownWorkflowError, type WorkflowEngine } from "@ratchet/engine";
-import type { FastifyInstance, FastifyReply } from "fastify";
-import type { ErrorResponse, ScheduleRef, SchedulesResponse } from "../api.types.ts";
+import type { FastifyInstance } from "fastify";
+import type { ScheduleRef, SchedulesResponse } from "../api.types.ts";
 import type { ApiOptions } from "../app.ts";
-import { toJson, workflowLabel } from "../api.utils.ts";
+import { sendError, toJson, workflowLabel } from "../api.utils.ts";
 import { getSchedule, listSchedules } from "./schedules.queries.ts";
 import { createScheduleBody, scheduleParams, updateScheduleBody } from "./schedules.schemas.ts";
-
-/** Sends an ErrorResponse with the given status. */
-function sendError({
-  reply,
-  status,
-  error,
-}: {
-  reply: FastifyReply;
-  status: number;
-  error: string;
-}) {
-  const body: ErrorResponse = { error };
-  return reply.code(status).send(body);
-}
 
 /**
  * Reading schedules, and creating, changing, pausing, resuming and deleting

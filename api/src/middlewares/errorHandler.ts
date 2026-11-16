@@ -1,6 +1,7 @@
 import type { FastifyError, FastifyReply, FastifyRequest } from "fastify";
 import { ZodError } from "zod";
 import type { ErrorResponse } from "../api.types.ts";
+import { sendError } from "../api.utils.ts";
 
 /**
  * Turns every thrown error into an ErrorResponse. A malformed request (failed
@@ -14,10 +15,8 @@ export function errorHandler(error: FastifyError, req: FastifyRequest, reply: Fa
     return reply.code(400).send(body);
   }
   if (error.statusCode && error.statusCode < 500) {
-    const body: ErrorResponse = { error: error.message };
-    return reply.code(error.statusCode).send(body);
+    return sendError({ reply, status: error.statusCode, error: error.message });
   }
   console.error(`${req.method} ${req.url} failed:`, error);
-  const body: ErrorResponse = { error: "Internal error" };
-  return reply.code(500).send(body);
+  return sendError({ reply, status: 500, error: "Internal error" });
 }

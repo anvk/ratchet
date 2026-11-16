@@ -96,7 +96,9 @@ export interface RunsResponse {
 export interface ScheduleInfo {
   /** The workflow's name. */
   workflow: string;
+  /** The workflow's display title from the app's labels, or one made from its name. */
   workflow_title: string;
+  /** The schedule's name, which is unique among the workflow's schedules. */
   name: string;
   /** Five fields, in UTC. Null for a schedule that fires once. */
   cron: string | null;

@@ -12,6 +12,7 @@ const SCHEDULE_COLUMNS = [
   "last_fired_at",
 ] as const;
 
+/** Every schedule, ordered by workflow, then name. */
 export function listSchedules() {
   return db
     .selectFrom("schedules")

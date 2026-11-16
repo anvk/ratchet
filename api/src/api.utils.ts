@@ -1,4 +1,5 @@
-import type { WorkflowLabels } from "./api.types.ts";
+import type { FastifyReply } from "fastify";
+import type { ErrorResponse, WorkflowLabels } from "./api.types.ts";
 
 /** A value after JSON serialization: dates become ISO strings. */
 export type ToJson<T> = T extends Date
@@ -60,4 +61,18 @@ export function stepLabel({
   return found
     ? { title: found.title, description: found.description }
     : { title: titleFromName(step), description: null };
+}
+
+/** Sends an ErrorResponse with the given status. */
+export function sendError({
+  reply,
+  status,
+  error,
+}: {
+  reply: FastifyReply;
+  status: number;
+  error: string;
+}) {
+  const body: ErrorResponse = { error };
+  return reply.code(status).send(body);
 }

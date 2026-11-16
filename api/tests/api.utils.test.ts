@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import type { FastifyReply } from "fastify";
 import type { WorkflowLabels } from "../src/api.types.ts";
-import { stepLabel, titleFromName, toJson, workflowLabel, type ToJson } from "../src/api.utils.ts";
+import {
+  sendError,
+  stepLabel,
+  titleFromName,
+  toJson,
+  workflowLabel,
+  type ToJson,
+} from "../src/api.utils.ts";
 
 // Type-level checks: these fail `pnpm typecheck`, not `pnpm test`.
 type Equal<A, B> =
@@ -118,4 +126,20 @@ test("a step of a workflow with no labels, or with labels undefined, gets a titl
     title: "Score risk",
     description: null,
   });
+});
+
+test("sendError replies with the status and a body holding only the error", () => {
+  const sent: { status?: number; body?: unknown } = {};
+  const reply = {
+    code(status: number) {
+      sent.status = status;
+      return this;
+    },
+    send(body: unknown) {
+      sent.body = body;
+      return this;
+    },
+  } as unknown as FastifyReply;
+  sendError({ reply, status: 404, error: "Run not found" });
+  assert.deepEqual(sent, { status: 404, body: { error: "Run not found" } });
 });
