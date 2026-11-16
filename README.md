@@ -11,8 +11,8 @@ pnpm dev
 ```
 
 Open <http://localhost:5173>, pick a workflow and press **Start run**. `pnpm dev` starts the demo: Postgres, the API, the orchestrator, three workers and the dashboard.
-How it all works is explained in [`docs/how-the-engine-works-v6.md`](docs/how-the-engine-works-v6.md)
-(earlier designs: [v1](docs/how-the-engine-works-v1.md), [v2](docs/how-the-engine-works-v2.md), [v3](docs/how-the-engine-works-v3.md), [v4](docs/how-the-engine-works-v4.md), [v5](docs/how-the-engine-works-v5.md)).
+How it all works is explained in [`docs/how-the-engine-works-v7.md`](docs/how-the-engine-works-v7.md)
+(earlier designs: [v1](docs/how-the-engine-works-v1.md), [v2](docs/how-the-engine-works-v2.md), [v3](docs/how-the-engine-works-v3.md), [v4](docs/how-the-engine-works-v4.md), [v5](docs/how-the-engine-works-v5.md), [v6](docs/how-the-engine-works-v6.md)).
 
 ```sh
 pnpm test        # engine tests against real Postgres and worker processes
@@ -33,10 +33,10 @@ to show it running; none of the demo is needed to use the engine.
 
 **The engine**
 
-| Path              | What's there                                                                                                                                                                                    |
-| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `workflowEngine/` | Workers, the orchestrator, leases, retries, concurrency groups, the registry and the `WorkflowStore` interface, with Postgres in `src/stores/postgres/`. What it promises is in `guarantees.md` |
-| `docs/`           | Walkthroughs of how the engine works, for newcomers. `how-the-engine-works-v6.md` describes the current engine                                                                                  |
+| Path              | What's there                                                                                                                                                                                               |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `workflowEngine/` | Workers, the orchestrator, leases, retries, concurrency groups, schedules, the registry and the `WorkflowStore` interface, with Postgres in `src/stores/postgres/`. What it promises is in `guarantees.md` |
+| `docs/`           | Walkthroughs of how the engine works, for newcomers. `how-the-engine-works-v7.md` describes the current engine                                                                                             |
 
 **Demo only**
 
@@ -106,6 +106,22 @@ export default defineWorkflow<StockReportInput>({
 });
 ```
 
+### Run it on a schedule
+
+`schedules` starts runs by the clock. Each has a name, a five-field cron
+expression in UTC, and the input its runs start with. The orchestrator starts
+one run per tick, however many orchestrators are running:
+
+```ts
+export default defineWorkflow<StockReportInput>({
+  name: "stock-report",
+  schedules: [{ name: "nightly", cron: "0 2 * * *", input: { ticker: "AAPL" } }], // 02:00 UTC
+  steps: [
+    // ...as above
+  ],
+});
+```
+
 ### Create the engine
 
 An engine pairs your workflows with a store, which keeps their state in
@@ -131,7 +147,7 @@ They only share the database, so each can run as its own process, container
 or pod.
 
 **Whatever starts runs**, such as your API. `sync()` saves each workflow's
-plan, which `startRun` needs; call it once at startup. `startRun` only records
+plan and schedules, which starting a run needs; call it once at startup. `startRun` only records
 the run and returns its id. Workers do the work.
 
 ```ts
@@ -157,19 +173,22 @@ await engine.close();
 ```
 
 **One orchestrator** gives a step to another worker when its worker stops
-sending heartbeats, for example because it crashed.
+sending heartbeats, for example because it crashed, and starts a run each time
+a schedule is due. It starts runs, so it calls `sync()` too.
 
 ```ts
 // orchestrator.ts
 import { closeOnSignals } from "@ratchet/engine";
 import { engine } from "./engine.ts";
 
+await engine.sync();
+
 closeOnSignals(engine);
 await engine.runOrchestrator();
 await engine.close();
 ```
 
-Workers and the orchestrator don't call `sync()`.
+Workers don't call `sync()`.
 
 ### Running in containers
 
@@ -181,7 +200,8 @@ Workers and the orchestrator don't call `sync()`.
   killing the process (30 seconds in Kubernetes). A worker killed mid-step
   loses nothing: the orchestrator gives the step to another worker once its
   lease expires.
-- A second orchestrator is safe, but does the same work twice.
+- A second orchestrator is safe: a lease is swept once and a schedule fires
+  once, whichever of them gets there first.
 - Each process keeps up to 10 Postgres connections. Keep processes × 10 under
   Postgres's `max_connections`.
 
@@ -194,6 +214,7 @@ dashboard on top.
 | --------------- | ------------------------------------------------------- |
 | `workflows`     | One row per version of a workflow                       |
 | `steps`         | The steps in each workflow version                      |
+| `schedules`     | One row per schedule, with when it next fires           |
 | `workflow_runs` | One row each time a workflow is started                 |
 | `step_runs`     | Progress of each step in a run; workers claim from here |
 | `events`        | Append-only history of every state change               |
