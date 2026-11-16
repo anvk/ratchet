@@ -1,0 +1,9 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: ratchet
+type: software
+authors:
+  - family-names: Novak
+    given-names: Alexey
+repository-code: "https://github.com/anvk/ratchet"
+license: Apache-2.0
