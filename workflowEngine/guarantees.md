@@ -58,6 +58,9 @@ What the engine promises. Each guarantee is backed by a test in
   its concurrency slot. Cancelling takes the run's lock and changes every step in
   one statement, so it can't miss a step that is being claimed. A cancelled run
   can be resumed with a redrive.
+- **A transaction Postgres aborts to break a deadlock is run again.** Up to
+  three more times, after a short random wait, so a deadlock delays an
+  operation instead of failing it. Each retry is logged.
 - **Every failed step and run records why.** `failure_reason` is set exactly
   when the status is `failed` (a database check enforces it): `non_retryable`,
   `attempts_exhausted`, `lost_worker`, `unknown_step` or `cancelled`. On a step,
