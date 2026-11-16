@@ -101,8 +101,8 @@ const eventsOf = (runId: string, type: string) =>
     .where("type", "=", type)
     .execute();
 
-/** What the engine's `prepare` does: the workflow's code, and its concurrency group for the schedule's input. */
-function prepare({ workflow, input }: { workflow: string; input: unknown }): ScheduledRun {
+/** What the engine's `scheduledRunFor` does: the workflow's code, and its concurrency group for the schedule's input. */
+function scheduledRunFor({ workflow, input }: { workflow: string; input: unknown }): ScheduledRun {
   const definition = WORKFLOWS.find((w) => w.name === workflow)!;
   const key = definition.concurrency?.key(input as never);
   return {
@@ -116,7 +116,7 @@ function prepare({ workflow, input }: { workflow: string; input: unknown }): Sch
 
 /** Fires what is due among the given workflows' schedules. */
 const fire = (workflows: WorkflowDefinition[] = WORKFLOWS) =>
-  store.fireDueSchedules({ workflows, prepare });
+  store.fireDueSchedules({ workflows, scheduledRunFor });
 
 /** Waits until check returns something truthy, and returns it. */
 async function waitFor<T>(check: () => Promise<T>, timeoutMs = 10_000): Promise<NonNullable<T>> {
@@ -197,7 +197,10 @@ test("missed ticks start one run", async () => {
 });
 
 test("a scheduled run waits for its concurrency group like any other", async () => {
-  const { concurrency } = prepare({ workflow: scheduledExclusive.name, input: { ms: 1500 } });
+  const { concurrency } = scheduledRunFor({
+    workflow: scheduledExclusive.name,
+    input: { ms: 1500 },
+  });
   const holder = await store.startRun({
     definition: scheduledExclusive,
     input: { ms: 1500 },
@@ -221,20 +224,20 @@ test("a schedule of a workflow the orchestrator doesn't have is left alone", asy
   const dueAt = await makeDue(scheduledExclusive.name);
   const before = await scheduleRow(scheduledExclusive.name);
   const runsBefore = (await scheduledRuns(scheduledExclusive.name)).length;
-  const prepared: string[] = [];
+  const askedAbout: string[] = [];
 
   assert.equal(
     await store.fireDueSchedules({
       workflows: [scheduled],
-      prepare: (schedule) => {
-        prepared.push(schedule.workflow);
-        return prepare(schedule);
+      scheduledRunFor: (schedule) => {
+        askedAbout.push(schedule.workflow);
+        return scheduledRunFor(schedule);
       },
     }),
     0,
   );
 
-  assert.deepEqual(prepared, []);
+  assert.deepEqual(askedAbout, []);
   assert.equal((await scheduledRuns(scheduledExclusive.name)).length, runsBefore);
   assert.deepEqual((await scheduleRow(scheduledExclusive.name)).next_fire_at, dueAt);
   assert.deepEqual(

@@ -20,14 +20,14 @@ export async function runOrchestrator({
   settings,
   stopSignal,
   workflows,
-  prepare,
+  scheduledRunFor,
 }: {
   store: WorkflowStore;
   settings: WorkflowEngineSettings;
   stopSignal: AbortSignal;
   workflows: WorkflowDefinition[];
   /** Works out a due schedule's run. See WorkflowStore.fireDueSchedules. */
-  prepare: (schedule: { workflow: string; name: string; input: unknown }) => ScheduledRun;
+  scheduledRunFor: (schedule: { workflow: string; name: string; input: unknown }) => ScheduledRun;
 }) {
   const { sweepIntervalMs } = settings;
 
@@ -47,7 +47,7 @@ export async function runOrchestrator({
       console.error("[orchestrator] sweep failed:", err instanceof Error ? err.message : err);
     }
     try {
-      const started = await store.fireDueSchedules({ workflows, prepare });
+      const started = await store.fireDueSchedules({ workflows, scheduledRunFor });
       if (started > 0) console.log(`[orchestrator] started ${started} scheduled run(s)`);
     } catch (err) {
       console.error("[orchestrator] schedules failed:", err instanceof Error ? err.message : err);

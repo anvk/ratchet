@@ -74,7 +74,9 @@ async function makeDue(name: string, minutesAgo = 1): Promise<Date> {
 const fire = () =>
   store.fireDueSchedules({
     workflows: [scheduled],
-    prepare: ({ workflow }) => ({ definition: WORKFLOWS.find((w) => w.name === workflow)! }),
+    scheduledRunFor: ({ workflow }) => ({
+      definition: WORKFLOWS.find((w) => w.name === workflow)!,
+    }),
   });
 
 /** The runs a schedule started and that still point at it, oldest moment first. */

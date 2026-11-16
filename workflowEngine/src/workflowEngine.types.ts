@@ -289,14 +289,14 @@ export interface WorkflowStore {
    * Starts a run for each due, unpaused schedule of these workflows, and moves
    * it on to its next tick; a one-time schedule has none afterwards. A schedule
    * starts one run per tick however many processes call this at once. If ticks
-   * were missed, it starts one run and resumes from now. `prepare` is called for
+   * were missed, it starts one run and resumes from now. `scheduledRunFor` is called for
    * each due schedule with its workflow, name and input, and returns the
    * workflow's code and concurrency group. Schedules of other workflows are left
    * alone. Returns how many runs it started.
    */
   fireDueSchedules(request: {
     workflows: WorkflowDefinition[];
-    prepare: (schedule: { workflow: string; name: string; input: unknown }) => ScheduledRun;
+    scheduledRunFor: (schedule: { workflow: string; name: string; input: unknown }) => ScheduledRun;
   }): Promise<number>;
   /** Releases connections or file handles. */
   close(): Promise<void>;

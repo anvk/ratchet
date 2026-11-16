@@ -1260,7 +1260,7 @@ const MAX_FIRES_PER_CALL = 100;
  * Each firing is one transaction: lock the due schedule's row, start the run,
  * and move next_fire_at forward (to null for a one-time schedule, which has no
  * more ticks). They commit together, so a schedule is never left due after its
- * run started, or advanced without its run. `prepare` supplies the run's code
+ * run started, or advanced without its run. `scheduledRunFor` supplies the run's code
  * and concurrency group from the row's input.
  *
  * The lock is FOR UPDATE SKIP LOCKED, like claimStep's: an orchestrator that
@@ -1281,10 +1281,10 @@ const MAX_FIRES_PER_CALL = 100;
  */
 async function fireDueSchedules({
   workflows,
-  prepare,
+  scheduledRunFor,
 }: {
   workflows: WorkflowDefinition[];
-  prepare: (schedule: { workflow: string; name: string; input: unknown }) => ScheduledRun;
+  scheduledRunFor: (schedule: { workflow: string; name: string; input: unknown }) => ScheduledRun;
 }): Promise<number> {
   if (workflows.length === 0) return 0;
   const names = workflows.map((workflow) => workflow.name);
@@ -1316,7 +1316,7 @@ async function fireDueSchedules({
 
       // Due rows have a next_fire_at: the query above compares it.
       const scheduledFor = due.next_fire_at!;
-      const { definition, concurrency } = prepare({
+      const { definition, concurrency } = scheduledRunFor({
         workflow: due.workflow,
         name: due.name,
         input: due.input,

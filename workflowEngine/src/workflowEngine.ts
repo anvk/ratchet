@@ -176,7 +176,7 @@ export function createWorkflowEngine({
   };
 
   /** What a due schedule's run needs: its workflow's code, and the concurrency group its input falls in. */
-  function prepareScheduledRun({
+  function scheduledRunFor({
     workflow,
     input,
   }: {
@@ -213,7 +213,7 @@ export function createWorkflowEngine({
           settings,
           stopSignal: stop.signal,
           workflows,
-          prepare: prepareScheduledRun,
+          scheduledRunFor,
         }),
       ),
     async close({ force = false } = {}) {
