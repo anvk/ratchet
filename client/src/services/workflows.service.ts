@@ -2,6 +2,7 @@ import type {
   EventsResponse,
   RunDetail,
   RunsResponse,
+  ScheduleRef,
   SchedulesResponse,
   StartRunResponse,
   WorkflowsResponse,
@@ -41,3 +42,17 @@ export const fetchEvents = (id: string) =>
 /** Lists every schedule, with when it next fires. */
 export const fetchSchedules = () =>
   api.get<SchedulesResponse>("/schedules").then((r) => r.schedules);
+
+/** Stops a schedule from firing; its ticks are skipped until it is resumed. */
+export const pauseSchedule = ({ workflow, name }: ScheduleRef) =>
+  api.post<ScheduleRef>(
+    `/schedules/${encodeURIComponent(workflow)}/${encodeURIComponent(name)}/pause`,
+    {},
+  );
+
+/** Lets a paused schedule fire again, from its next tick. */
+export const resumeSchedule = ({ workflow, name }: ScheduleRef) =>
+  api.post<ScheduleRef>(
+    `/schedules/${encodeURIComponent(workflow)}/${encodeURIComponent(name)}/resume`,
+    {},
+  );
