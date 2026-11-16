@@ -28,6 +28,10 @@ export const QUERY_KEYS = {
       params.finished,
     ],
   },
+  schedules: {
+    /** Every schedule, with when it next fires. */
+    list: () => ["schedules", "list"],
+  },
   workflows: {
     /** Every workflow the API knows, with its presets. */
     list: () => ["workflows", "list"],

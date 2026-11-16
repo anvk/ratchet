@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { formatAge, formatDuration } from "../src/utils/format.ts";
+import { formatAge, formatDuration, formatUntil } from "../src/utils/format.ts";
 
 const NOW = Date.parse("2026-11-10T12:00:00.000Z");
 
@@ -56,4 +56,28 @@ test("formatAge picks the largest whole unit", () => {
 
 test("formatAge treats a time in the future as just now", () => {
   assert.equal(formatAge({ at: ago(-30), now: NOW }), "0s ago");
+});
+
+/** An ISO timestamp this many seconds after NOW. */
+const untilNow = (seconds: number) => new Date(NOW + seconds * 1000).toISOString();
+
+test("formatUntil shows a dash without a time", () => {
+  assert.equal(formatUntil({ at: null, now: NOW }), "–");
+});
+
+test("formatUntil picks the largest whole unit", () => {
+  const until = (seconds: number) => formatUntil({ at: untilNow(seconds), now: NOW });
+  assert.equal(until(40), "in 40s");
+  assert.equal(until(59), "in 59s");
+  assert.equal(until(60), "in 1m");
+  assert.equal(until(3599), "in 59m");
+  assert.equal(until(3600), "in 1h");
+  assert.equal(until(86_399), "in 23h");
+  assert.equal(until(86_400), "in 1d");
+  assert.equal(until(2 * 86_400), "in 2d");
+});
+
+test("formatUntil shows now once the time has passed or is this second", () => {
+  assert.equal(formatUntil({ at: untilNow(0), now: NOW }), "now");
+  assert.equal(formatUntil({ at: ago(30), now: NOW }), "now");
 });

@@ -2,6 +2,7 @@ import type {
   EventsResponse,
   RunDetail,
   RunsResponse,
+  SchedulesResponse,
   StartRunResponse,
   WorkflowsResponse,
 } from "@ratchet/api/types";
@@ -36,3 +37,7 @@ export const fetchRun = (id: string) => api.get<RunDetail>(`/runs/${id}`);
 /** Returns a run's history, oldest first. */
 export const fetchEvents = (id: string) =>
   api.get<EventsResponse>(`/runs/${id}/events`).then((r) => r.events);
+
+/** Lists every schedule, with when it next fires. */
+export const fetchSchedules = () =>
+  api.get<SchedulesResponse>("/schedules").then((r) => r.schedules);

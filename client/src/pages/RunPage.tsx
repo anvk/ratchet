@@ -136,6 +136,12 @@ export function RunPage() {
       {run.workflow_description && (
         <p className="mt-0.5 mb-4 text-muted">{run.workflow_description}</p>
       )}
+      {run.scheduled_for && (
+        <p className="mb-4 text-[13px] text-muted">
+          Started by {run.schedule ? `schedule ${run.schedule}` : "a schedule"}, for{" "}
+          {new Date(run.scheduled_for).toLocaleString()}
+        </p>
+      )}
 
       <FlowDiagram
         steps={steps}
