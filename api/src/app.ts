@@ -26,7 +26,7 @@ export function buildApp(engine: WorkflowEngine, options: ApiOptions = {}) {
   healthRoutes(app);
   workflowsRoutes({ app, engine, ...options });
   runsRoutes({ app, engine, labels: options.labels });
-  schedulesRoutes({ app, labels: options.labels });
+  schedulesRoutes({ app, engine, labels: options.labels });
 
   return app;
 }
