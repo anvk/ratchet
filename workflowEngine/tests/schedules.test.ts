@@ -14,7 +14,10 @@ const report = defineWorkflow({
 /** An engine with one workflow, "report", over a store that counts the schedule calls it gets. */
 function engineWithFakeStore() {
   const { store, calls } = fakeStore({ workflow: "report" });
-  return { engine: createWorkflowEngine({ workflows: [report], store }), calls };
+  return {
+    engine: createWorkflowEngine({ workflows: [report], store, settings: { timeoutMs: 60_000 } }),
+    calls,
+  };
 }
 
 test("create passes a valid cron schedule to the store", async () => {

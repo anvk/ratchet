@@ -18,7 +18,7 @@ const WORKFLOWS = [scheduled, scheduledExclusive];
 const engine = createWorkflowEngine({
   workflows: WORKFLOWS,
   store: { ...store, close: async () => {} },
-  settings: { sweepIntervalMs: 50 },
+  settings: { timeoutMs: 60_000, sweepIntervalMs: 50 },
 });
 
 before(async () => {
@@ -250,7 +250,7 @@ test("the orchestrator starts a due schedule's run", async () => {
   const orchestratorEngine = createWorkflowEngine({
     workflows: [scheduled],
     store: { ...store, close: async () => {} },
-    settings: { sweepIntervalMs: 50 },
+    settings: { timeoutMs: 60_000, sweepIntervalMs: 50 },
   });
   const orchestrator = orchestratorEngine.runOrchestrator();
   try {

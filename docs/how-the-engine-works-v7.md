@@ -66,7 +66,7 @@ A step can also set **`leaseMs`**: how long its worker may go silent before the 
 
 And it can set its **retry policy** (section 11): **`maxAttempts`**, how many times it may run in all, and **`backoffMs`**, the first wait before a retry. `screen-sanctions` calls a flaky vendor, so it gets 4 attempts, starting half a second apart; steps that don't set them get 3 attempts, starting 1 second apart.
 
-And a **time limit**: **`timeoutMs`**, how long one attempt may run before the worker gives up on it (section 11). `screen-sanctions` sets 6 seconds. Steps that don't set one have no limit.
+And a **time limit**: **`timeoutMs`**, how long one attempt may run before the worker gives up on it (section 11). `screen-sanctions` sets 6 seconds. Steps that don't set one get the engine's `timeoutMs`.
 
 The workflow as a whole can set **`concurrency`**: runs that share a key, such as payments from one account, don't overlap (section 13).
 
@@ -299,7 +299,7 @@ While it waits, the step is `ready` with `ready_at` in the future, so no worker 
 
 **A step can be stuck without failing.** Everything above starts with a step that throws. A vendor that never answers doesn't throw: the step just waits. Its worker is fine, so heartbeats keep going and the lease keeps renewing (section 7). A lease only proves the **worker** is alive, not that the **step** is getting anywhere. Left alone, the step would run forever, and in a concurrency group it would keep its run's slot forever too (section 13).
 
-So a step can set **`timeoutMs`**, a limit on one attempt. When it passes, the worker fires `ctx.signal`, stops waiting for the step, and records the attempt as failed with the error `Timed out after 6000ms`. From there it's an ordinary failed attempt: it waits out its backoff and runs again, and it counts towards `maxAttempts`. Here is a sanctions check whose vendor doesn't answer the first time:
+So every attempt has a limit, **`timeoutMs`**. A step can set its own; the rest get the engine's `timeoutMs` setting, the one setting with no default, so an engine can't be created without choosing it. When the limit passes, the worker fires `ctx.signal`, stops waiting for the step, and records the attempt as failed with the error `Timed out after 6000ms`. From there it's an ordinary failed attempt: it waits out its backoff and runs again, and it counts towards `maxAttempts`. Here is a sanctions check whose vendor doesn't answer the first time:
 
 ```
 0.0s   attempt 1 claimed     the vendor never answers
@@ -629,9 +629,8 @@ interface WorkflowStore {
 - **Lost leases need the orchestrator:** if it isn't running, steps whose worker went silent stay `running`.
 - **A run that never finishes keeps its slot.** A run whose steps no worker can claim, say because no worker has its version, stays in progress, and every run waiting behind it in its group waits too, until someone cancels it.
 - **A timed-out step isn't stopped.** The worker stops waiting for it, but unless the step honours `ctx.signal` its function keeps running in the background, and may overlap with its own retry.
-- **A step without a time limit can hang forever.** If it never returns and its worker stays alive, nothing gives up on it.
 - **A cancelled step isn't stopped either.** Its worker hears at its next heartbeat, up to a third of the lease later, and the step's function only stops if it honours `ctx.signal`.
 - **Schedules need the orchestrator too.** While none is running, nothing fires; when one starts again, each schedule that missed ticks starts one run, not one for each.
 - **A schedule doesn't wait for its last run.** Each tick starts a run even if the one before is still going, unless the workflow's `concurrency` makes them take turns.
 
-All ten are listed in `workflowEngine/guarantees.md`.
+All nine are listed in `workflowEngine/guarantees.md`.

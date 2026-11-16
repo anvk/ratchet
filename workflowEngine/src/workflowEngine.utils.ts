@@ -6,7 +6,7 @@ import {
   type FailureReason,
   type WorkflowRunStatus,
 } from "./workflowEngine.constants.ts";
-import type { StepDefaults, WorkflowEngineSettings } from "./workflowEngine.types.ts";
+import type { StepDefaults } from "./workflowEngine.types.ts";
 
 /** Throws if a name appears more than once. `what` labels the error message. */
 export function assertUnique(names: string[], what: string) {
@@ -36,7 +36,7 @@ export function retryDelayMs({
 }
 
 /** The parts of an engine's settings that apply to steps which don't set their own. */
-export function stepDefaults(settings: WorkflowEngineSettings): StepDefaults {
+export function stepDefaults(settings: StepDefaults): StepDefaults {
   const { leaseMs, maxAttempts, backoffMs, maxBackoffMs } = settings;
   return { leaseMs, maxAttempts, backoffMs, maxBackoffMs };
 }

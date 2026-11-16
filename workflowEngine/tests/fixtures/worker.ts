@@ -5,7 +5,7 @@ import { scheduledWorkflows, workflows } from "./workflows.ts";
 const engine = createWorkflowEngine({
   workflows: [...workflows, ...scheduledWorkflows],
   store: createPostgresStore(),
-  settings: { pollMs: 5 },
+  settings: { timeoutMs: 60_000, pollMs: 5 },
 });
 
 closeOnSignals(engine);

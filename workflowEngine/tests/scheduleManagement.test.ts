@@ -19,7 +19,7 @@ function newEngine() {
   return createWorkflowEngine({
     workflows: WORKFLOWS,
     store: { ...store, close: async () => {} },
-    settings: { sweepIntervalMs: 50 },
+    settings: { timeoutMs: 60_000, sweepIntervalMs: 50 },
   });
 }
 const engine = newEngine();

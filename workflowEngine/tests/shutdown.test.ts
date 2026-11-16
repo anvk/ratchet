@@ -36,7 +36,7 @@ async function engineWithRunningStep(settings?: Partial<WorkflowEngineSettings>)
   const engine: WorkflowEngine = createWorkflowEngine({
     workflows: [slow],
     store,
-    settings: { pollMs: 1, ...settings },
+    settings: { timeoutMs: 60_000, pollMs: 1, ...settings },
   });
   const worker = engine.runWorker({ workerId: "worker" });
   await stepStarted;
