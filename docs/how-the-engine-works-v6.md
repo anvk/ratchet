@@ -466,30 +466,20 @@ cancel:  holds the run,   wants the step
 worker:  holds the step,  wants the run
 ```
 
-Neither can move, and neither is doing anything wrong. They arrived in the same few milliseconds, in an unlucky order. The engine deals with deadlocks in three layers.
+Neither can move, and neither is doing anything wrong. They arrived in the same few milliseconds, in an unlucky order.
 
-**Is a deadlock expected?** It isn't expected, but it isn't impossible. The first layer rules out every deadlock that is known about, so in normal running there are none. What it can't rule out is a mistake. The lock order is kept by care, not enforced by anything: one piece of code that takes two locks the other way round creates a deadlock, and it only shows when two transactions meet at the wrong moment. The other two layers are for that case. With them, an unforeseen deadlock costs a second instead of a failed operation, and it leaves a line in the log. That line means the lock order has a hole, and it's worth finding even though nothing failed.
+**The engine avoids them with one lock order.** A deadlock needs a circle of waiting. If every transaction takes its locks in the same order, there can't be one, because nobody ever holds a later lock while waiting for an earlier one. The engine's order is **run, then group, then steps** (sections 10 and 13). The few places that can't follow it never wait instead: a run's first claim and the admission of a waiting run both skip a row that's locked (section 14).
 
-**1. Avoid them: one lock order.** A deadlock needs a circle of waiting. If every transaction takes its locks in the same order, there can't be one, because nobody ever holds a later lock while waiting for an earlier one. The engine's order is **run, then group, then steps** (sections 10 and 13). The few places that can't follow it never wait instead: a run's first claim and the admission of a waiting run both skip a row that's locked (section 14).
+**Is a deadlock expected?** It isn't expected, but it isn't impossible. The lock order rules out every deadlock that is known about, so in normal running there are none. What it can't rule out is a mistake. The order is kept by care, not enforced by anything: one piece of code that takes two locks the other way round creates a deadlock, and it only shows when two transactions meet at the wrong moment.
 
-**2. Postgres breaks them.** That reasoning covers the paths someone thought about. For the rest, Postgres never lets a deadlock hang. After a second of waiting it looks for a circle, and if it finds one it aborts one of the transactions, undoes everything it did, and lets the other carry on.
+**If one happens, Postgres breaks it.** Postgres never lets a deadlock hang. After a second of waiting it looks for a circle, and if it finds one it aborts one of the transactions with the error `deadlock detected`, undoes everything that transaction did, and lets the other carry on. Nothing is left half done: the aborted transaction's changes and its events are all gone together.
 
-**3. The store runs the aborted transaction again.** Up to three more times, each after a short random wait. With the pair above:
+**The engine does not try again by itself.** The error goes to whoever asked:
 
-```
-0.00s  a cancel and a worker's claim deadlock
-1.00s  Postgres aborts the cancel; the claim commits and lets go of the step
-1.03s  the store runs the cancel again: nothing is in its way
-       → it sees the step the worker just claimed, fails it, and cancels the run
-```
+- **A worker** logs it, waits a second (`errorBackoffMs`) and goes back to its loop. If it was claiming a step, the step is still there to claim. If it was saving a step's result, the result is lost, the step's lease runs out, and the step runs again (section 8).
+- **A call such as `cancelRun` or `startRun`** fails, and the caller sees the error. Calling it again works.
 
-**Why does trying again work?** Because a deadlock is an accident of timing, not something wrong with either transaction. By the time the aborted one runs again, the other has finished and released what it held. The second try also reads the data as it is by then, so it decides afresh instead of repeating a stale decision: in the example, it finds the step `running` and fails it.
-
-**Why is it safe?** The aborted transaction was rolled back completely, so the second try starts from nothing. That relies on one rule: a transaction in the store does nothing outside the database before it commits.
-
-**Why only deadlocks?** Any other error, such as a broken rule in the data or a workflow that doesn't exist, would fail the same way again. Retrying it would only delay the bad news.
-
-**Why stop after three?** The random wait keeps the two transactions from colliding again in step. A deadlock that still comes back after three tries isn't an accident, so the error is passed on where someone will see it. Every retry is logged for the same reason: a deadlock should cost a second, not go unnoticed.
+**Why not retry it automatically?** A retry would usually succeed: by the time the aborted transaction ran again, the other one would have finished. But a deadlock means the lock order has a hole, and a retry would turn that into a line in a log that nobody reads. A failed operation gets noticed, and then the hole gets found and closed. The cost is small, because nothing is lost or left inconsistent, so the engine prefers the mistake to be visible.
 
 ---
 
