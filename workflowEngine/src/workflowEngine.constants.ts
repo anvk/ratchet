@@ -56,7 +56,10 @@ export const DEFAULT_ENGINE_SETTINGS: WorkflowEngineSettings = {
    * crashed worker's step is picked up within a minute.
    */
   leaseMs: 30_000,
-  /** Expired leases are swept every second, so a lost step waits at most a second longer. */
+  /**
+   * The orchestrator's round: expired leases are swept and due scheduled runs started every
+   * second, so a lost step waits at most a second longer, and a scheduled run starts within a second of its minute.
+   */
   sweepIntervalMs: 1000,
   /** A step gets 3 tries in all: enough to ride out a blip, few enough to fail fast on a real bug. */
   maxAttempts: 3,

@@ -156,6 +156,18 @@ export interface EventFields {
   detail?: unknown;
 }
 
+/** A schedule the caller has code for, with what a run of it needs. */
+export interface ScheduleToFire {
+  /** The workflow the schedule belongs to. */
+  definition: WorkflowDefinition;
+  /** The schedule's name within its workflow. */
+  name: string;
+  /** The input its runs start with. */
+  input: unknown;
+  /** Worked out by the engine from the schedule's input. See WorkflowStore.startRun. */
+  concurrency?: { key: string; limit: number };
+}
+
 /**
  * Where workflow state lives. The engine only talks to this interface, so a
  * file or another database can replace Postgres by implementing it.
@@ -164,7 +176,12 @@ export interface EventFields {
  * together or not at all.
  */
 export interface WorkflowStore {
-  /** Saves each workflow's plan. Safe to repeat, and an edit creates a new version. */
+  /**
+   * Saves each workflow's plan. Safe to repeat, and an edit creates a new version.
+   * It also saves each workflow's schedules: a new one starts from its next
+   * tick, one whose cron changed is rescheduled from now, an unchanged one is
+   * left alone, and one no longer declared is removed.
+   */
   syncWorkflows(workflows: WorkflowDefinition[]): Promise<void>;
   /**
    * Creates a run with its starting steps (those that need nothing) ready to
@@ -250,6 +267,14 @@ export interface WorkflowStore {
    * doesn't exist or has finished. A cancelled run can be redriven.
    */
   cancelRun(request: { runId: string }): Promise<boolean>;
+  /**
+   * Starts a run for each of these schedules that is due, and moves it on to
+   * its next tick. A schedule starts one run per tick however many processes
+   * call this at once. If ticks were missed, it starts one run and resumes from
+   * now. Throws if one of the schedules was never saved by syncWorkflows.
+   * Returns how many runs it started.
+   */
+  fireDueSchedules(request: { schedules: ScheduleToFire[] }): Promise<number>;
   /** Releases connections or file handles. */
   close(): Promise<void>;
 }
@@ -284,7 +309,10 @@ export interface WorkflowEngineSettings {
   claimOrder: ClaimOrder;
   /** The lease for steps that don't set their own. See StepDefinition.leaseMs. */
   leaseMs: number;
-  /** How often the orchestrator sweeps for expired leases. */
+  /**
+   * How often the orchestrator does its rounds: sweeping expired leases and
+   * starting due scheduled runs.
+   */
   sweepIntervalMs: number;
   /** How many times a step may run, for steps that don't set their own. See StepDefinition.maxAttempts. */
   maxAttempts: number;
@@ -298,7 +326,11 @@ export interface WorkflowEngineSettings {
 export interface WorkflowEngine {
   readonly registry: Registry;
   readonly settings: WorkflowEngineSettings;
-  /** Saves this engine's workflows to its store. Call before starting runs. */
+  /**
+   * Saves this engine's workflows, and their schedules, to its store. Call it
+   * before starting runs, in every process that starts runs; that includes the
+   * orchestrator when a workflow has schedules.
+   */
   sync(): Promise<void>;
   /**
    * Starts a run of one of this engine's workflows, by name, and returns its
@@ -323,8 +355,9 @@ export interface WorkflowEngine {
   runWorker(options?: { workerId?: string }): Promise<void>;
   /**
    * Runs the orchestrator until the engine is closed. It looks after runs as a
-   * whole; so far, every sweepIntervalMs it makes steps whose worker stopped
-   * sending heartbeats ready again.
+   * whole, and every sweepIntervalMs does two jobs: it makes steps whose worker
+   * stopped sending heartbeats ready again, and it starts a run for each
+   * schedule of this engine's workflows that is due.
    */
   runOrchestrator(): Promise<void>;
   /**

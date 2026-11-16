@@ -55,6 +55,7 @@ export function fakeStore({
     redriveRun: async () => false,
     cancelRun: async () => false,
     sweepExpiredLeases: async () => 0,
+    fireDueSchedules: async () => 0,
     close: async () => {
       calls.closed++;
     },

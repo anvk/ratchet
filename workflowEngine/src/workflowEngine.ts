@@ -1,6 +1,7 @@
 import { DEFAULT_ENGINE_SETTINGS } from "./workflowEngine.constants.ts";
 import type {
   Registry,
+  ScheduleToFire,
   WorkflowDefinition,
   WorkflowEngine,
   WorkflowEngineSettings,
@@ -75,6 +76,43 @@ export function defineWorkflow<Input = unknown>(
 }
 
 /**
+ * The concurrency group a run of a workflow with this input belongs to, or
+ * undefined when the workflow has no `concurrency` or its key is null. Runs
+ * the workflow's key function, which is user code, so the store never has to.
+ */
+function concurrencyFor({
+  definition,
+  input,
+}: {
+  definition: WorkflowDefinition;
+  input: unknown;
+}): { key: string; limit: number } | undefined {
+  const key = definition.concurrency?.key(input);
+  return definition.concurrency && key != null
+    ? { key, limit: definition.concurrency.limit }
+    : undefined;
+}
+
+/**
+ * Lists every schedule of the given workflows with what its runs start with:
+ * the schedule's input (an empty object when it has none) and the concurrency
+ * group that input belongs to.
+ */
+function schedulesToFire(workflows: WorkflowDefinition[]): ScheduleToFire[] {
+  return workflows.flatMap((definition) =>
+    (definition.schedules ?? []).map((schedule) => {
+      const input = schedule.input ?? {};
+      return {
+        definition,
+        name: schedule.name,
+        input,
+        concurrency: concurrencyFor({ definition, input }),
+      };
+    }),
+  );
+}
+
+/**
  * Creates an engine from its workflows, storage and settings. Several engines
  * can run side by side, each only claiming work from its own workflows.
  */
@@ -129,11 +167,7 @@ export function createWorkflowEngine({
       const definition = registry.get(workflow);
       if (!definition) return Promise.reject(new UnknownWorkflowError(workflow));
       try {
-        const key = definition.concurrency?.key(input);
-        const concurrency =
-          definition.concurrency && key != null
-            ? { key, limit: definition.concurrency.limit }
-            : undefined;
+        const concurrency = concurrencyFor({ definition, input });
         return store.startRun({ definition, input, idempotencyKey, concurrency });
       } catch (err) {
         return Promise.reject(err);
@@ -143,7 +177,17 @@ export function createWorkflowEngine({
     cancelRun: (runId) => store.cancelRun({ runId }),
     runWorker: ({ workerId } = {}) =>
       track(runWorker({ registry, store, settings, stopSignal: stop.signal, workerId })),
-    runOrchestrator: () => track(runOrchestrator({ store, settings, stopSignal: stop.signal })),
+    // Built here, not when the engine is created, so a process that never runs
+    // an orchestrator never evaluates schedule keys.
+    runOrchestrator: () =>
+      track(
+        runOrchestrator({
+          store,
+          settings,
+          stopSignal: stop.signal,
+          schedules: schedulesToFire(workflows),
+        }),
+      ),
     async close({ force = false } = {}) {
       stop.abort();
       if (!force) await waitForLoops();

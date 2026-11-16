@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { createWorkflowEngine, FINISHED_RUN_STATUSES } from "../src/index.ts";
 import { createPostgresStore, db } from "../src/stores/postgres/index.ts";
-import { workflows } from "./fixtures/workflows.ts";
+import { scheduledWorkflows, workflows } from "./fixtures/workflows.ts";
 
 const WORKER = fileURLToPath(new URL("./fixtures/worker.ts", import.meta.url));
 const SCHEMA = fileURLToPath(new URL("../src/stores/postgres/schema.sql", import.meta.url));
@@ -34,7 +34,7 @@ async function resetDatabase() {
 /** Workers are real separate processes, so they compete the way they do in production. */
 export async function startWorkers(count: number) {
   await resetDatabase();
-  await createWorkflowEngine({ workflows, store }).sync();
+  await createWorkflowEngine({ workflows: [...workflows, ...scheduledWorkflows], store }).sync();
   for (let i = 1; i <= count; i++) {
     const worker = spawn(process.execPath, ["--import", "tsx", WORKER], {
       env: { ...process.env, WORKER_ID: `test-worker-${i}` },

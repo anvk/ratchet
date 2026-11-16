@@ -2,7 +2,7 @@
 -- (pnpm db:types), and Docker Compose and the tests apply it.
 --
 -- Two kinds of data, like a recipe and cooking that recipe tonight:
---   the plan:      workflows, steps
+--   the plan:      workflows, steps, schedules
 --   the execution: workflow_runs, step_runs, events
 
 CREATE TYPE workflow_run_status AS ENUM ('queued', 'running', 'succeeded', 'failed', 'cancelled');
@@ -56,6 +56,22 @@ CREATE TABLE steps (
   UNIQUE (workflow_id, position)
 );
 
+-- One row per schedule of a workflow, saved by sync. The orchestrator fires a
+-- schedule when next_fire_at has passed, and moves it forward in the same
+-- transaction that starts the run.
+CREATE TABLE schedules (
+  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  workflow      text NOT NULL,            -- the workflow's name
+  name          text NOT NULL,
+  cron          text NOT NULL,            -- kept to notice when it changes
+  next_fire_at  timestamptz NOT NULL,
+  last_fired_at timestamptz,
+  UNIQUE (workflow, name)
+);
+
+-- Lets the orchestrator find due schedules without reading them all.
+CREATE INDEX schedules_due_idx ON schedules (next_fire_at);
+
 CREATE TABLE workflow_runs (
   id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   workflow_id uuid NOT NULL REFERENCES workflows (id),
@@ -77,9 +93,15 @@ CREATE TABLE workflow_runs (
   -- When the run was given a slot. Null while it waits for one; a run in no
   -- group is admitted when it starts.
   admitted_at timestamptz,
+  -- Set for a run a schedule started: which one, and the tick it was for.
+  schedule_id   uuid REFERENCES schedules (id) ON DELETE SET NULL,
+  scheduled_for timestamptz,
   CHECK ((status = 'failed') = (failure_reason IS NOT NULL)),
   CHECK ((concurrency_key IS NULL) = (concurrency_limit IS NULL)),
-  CHECK (concurrency_limit > 0)
+  CHECK (concurrency_limit > 0),
+  -- A schedule starts at most one run per tick. The orchestrator's lock is what
+  -- ensures it; this makes a mistake there fail instead of running twice.
+  UNIQUE (schedule_id, scheduled_for)
 );
 
 -- Keyset pagination for the runs list, with and without a status filter.

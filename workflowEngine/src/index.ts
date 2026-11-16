@@ -12,6 +12,7 @@ export type {
   ClaimOrder,
   FinalFailure,
   Registry,
+  ScheduleToFire,
   StepDefaults,
   StepContext,
   StepDefinition,

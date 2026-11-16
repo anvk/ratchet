@@ -250,6 +250,34 @@ export const cancellable = defineWorkflow<CancellableInput>({
   ],
 });
 
+/** One quick step returning its input, started every minute by its schedule. */
+export const scheduled = defineWorkflow<{ from?: string }>({
+  name: "scheduled",
+  schedules: [{ name: "tick", cron: "* * * * *", input: { from: "schedule" } }],
+  steps: [{ name: "only", run: async (ctx) => ctx.input }],
+});
+
+interface ScheduledExclusiveInput {
+  /** How long the step takes. */
+  ms?: number;
+}
+
+/** A scheduled workflow whose runs go one at a time. */
+export const scheduledExclusive = defineWorkflow<ScheduledExclusiveInput>({
+  name: "scheduled-exclusive",
+  concurrency: { key: () => "scheduled-exclusive", limit: 1 },
+  schedules: [{ name: "tick", cron: "* * * * *", input: { ms: 50 } }],
+  steps: [
+    {
+      name: "only",
+      async run(ctx) {
+        await sleep(ctx.input.ms ?? 50);
+        return { done: true };
+      },
+    },
+  ],
+});
+
 export const workflows = [
   pipeline,
   slow,
@@ -261,3 +289,9 @@ export const workflows = [
   stalling,
   cancellable,
 ];
+
+/**
+ * Workflows with schedules, kept apart from `workflows` so an orchestrator built
+ * from the default list never fires them. Workers and the harness load both.
+ */
+export const scheduledWorkflows = [scheduled, scheduledExclusive];

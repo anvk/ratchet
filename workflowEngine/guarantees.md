@@ -70,6 +70,15 @@ What the engine promises. Each guarantee is backed by a test in
   up. A run that fails or is redriven goes through the same admission. Counting
   the slots and admitting a run happen under one lock per key, so two runs can't
   take the same slot.
+- **A schedule starts one run per tick, however many orchestrators are
+  running.** An orchestrator locks the due schedule's row (skipping rows another
+  has locked), and the run and the move to the next tick commit together. A
+  unique constraint on the schedule and tick backs it: if the lock were ever
+  wrong, the second run would fail to insert rather than run twice.
+- **Ticks missed while no orchestrator was running start one run,** for the
+  oldest missed tick, not one each. The schedule then resumes from now.
+- **A scheduled run is an ordinary run.** It goes through the same code as
+  `startRun`, so concurrency groups, admission and events apply to it.
 - **A repeated key starts one run.** Starting a run with an idempotency key the
   caller already used returns the existing run.
 - **Each step has a stable key.** `ctx.idempotencyKey` is the same on every
@@ -110,3 +119,9 @@ What the engine promises. Each guarantee is backed by a test in
   claim its steps (for example, no worker has its version), it stays in
   progress, and the runs waiting behind it in its group wait too, until someone
   cancels it.
+- **Schedules only fire while an orchestrator is running.** Without one, nothing
+  starts a scheduled run.
+- **Schedule times are UTC and to the minute,** and a run starts up to
+  `sweepIntervalMs` after its minute.
+- **A tick starts a run even if the previous one is still going,** unless the
+  workflow's `concurrency` prevents it.
