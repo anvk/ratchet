@@ -6,10 +6,10 @@ import {
   ancestors,
   canRedrive,
   dependents,
-  nextFireAfter,
   resolveNeeds,
   retryDelayMs,
 } from "../../workflowEngine.utils.ts";
+import { nextFireAfter } from "../../workflowEngine.cron.ts";
 import type { FailureReason } from "../../workflowEngine.constants.ts";
 import type {
   Claim,

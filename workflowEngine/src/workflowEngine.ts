@@ -8,7 +8,8 @@ import type {
   WorkflowStore,
 } from "./workflowEngine.types.ts";
 import { InvalidScheduleError, UnknownWorkflowError } from "./workflowEngine.errors.ts";
-import { assertCronFires, assertUnique } from "./workflowEngine.utils.ts";
+import { assertCronFires } from "./workflowEngine.cron.ts";
+import { assertUnique } from "./workflowEngine.utils.ts";
 import { runOrchestrator } from "./workflowEngine.orchestrator.ts";
 import { runWorker } from "./workflowEngine.worker.ts";
 

@@ -6,7 +6,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { sql } from "kysely";
 import { createWorkflowEngine, UnknownWorkflowError } from "../src/index.ts";
 import { db } from "../src/stores/postgres/index.ts";
-import { nextFireAfter } from "../src/workflowEngine.utils.ts";
+import { nextFireAfter } from "../src/workflowEngine.cron.ts";
 import { scheduled, scheduledExclusive } from "./fixtures/workflows.ts";
 
 // Real workers run the fixture workflows' steps. Nothing here waits for a real
