@@ -71,6 +71,8 @@ CREATE TABLE schedules (
   paused_at     timestamptz,
   -- Null once a one-time schedule has fired: it has nothing more to fire.
   next_fire_at  timestamptz,
+  -- When it last started a run. A tick skipped because its last run was still
+  -- going leaves this alone, and is recorded as an event on that run.
   last_fired_at timestamptz,
   created_at    timestamptz NOT NULL DEFAULT now(),
   -- A repeating schedule always has a next tick.
@@ -121,6 +123,9 @@ CREATE INDEX workflow_runs_status_list_idx ON workflow_runs (status, created_at 
 -- Finds a group's runs that are waiting or in progress, oldest first.
 CREATE INDEX workflow_runs_group_idx ON workflow_runs (concurrency_key, created_at, id)
   WHERE concurrency_key IS NOT NULL AND finished_at IS NULL;
+-- Finds a schedule's unfinished run, which makes its next tick start nothing.
+CREATE INDEX workflow_runs_schedule_open_idx ON workflow_runs (schedule_id, created_at, id)
+  WHERE schedule_id IS NOT NULL AND finished_at IS NULL;
 
 CREATE TABLE step_runs (
   id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),

@@ -548,9 +548,20 @@ An update or a resume locks the same row, so an edit and a firing take turns: th
 
 **Missed ticks start one run.** If no orchestrator was running for three hours, an every-minute schedule has missed 180 ticks. Starting 180 runs at once would help nobody. The first orchestrator back starts **one** run, for the oldest tick that was missed, and sets `next_fire_at` to the first tick after now. A one-time schedule whose moment was missed this way fires when an orchestrator is back. This is different from pausing, which starts no run for the ticks it skipped: nobody chose for the orchestrator to be down.
 
-**A scheduled run is an ordinary run.** It's created by the same code as any other, so it waits its turn in a concurrency group (section 13), can be cancelled (section 14) and writes the same events. The only differences are the two columns above, and its `run_queued` event, which names the schedule.
+**A scheduled run is an ordinary run.** It's created by the same code as any other, so it waits its turn in a concurrency group (section 13), can be cancelled (section 14) and writes the same events. The differences are the two columns above, its `run_queued` event, which names the schedule, and what happens at the schedule's next tick.
 
-That also answers what happens when a run takes longer than the gap between ticks: the next tick starts another run alongside it. A workflow that mustn't overlap with itself says so with `concurrency`, and its scheduled runs then queue like any others.
+**When a run outlasts the gap between ticks.** A schedule never has two of its runs going at once. A tick that finds the last one unfinished **starts nothing**, and isn't made up later:
+
+```
+09:00  tick → run A starts
+09:05  tick → A is still going → skipped
+09:12         A finishes
+09:15  tick → run B starts
+```
+
+The check is one more step in the firing transaction: is there a run with this schedule's `schedule_id` and no `finished_at`? Only the schedule's own runs count, and a run counts until it has succeeded, failed or been cancelled, so one waiting in a concurrency group (section 13) or redriven (section 11) counts too.
+
+A skipped tick has no run of its own to write an event on, so the event goes on the run that was in the way: run A gets a **`schedule_tick_skipped`** event naming the schedule and the tick.
 
 **Where the lock fits.** When a schedule fires, its row is locked before anything else, and the run is then started under it in the usual way (section 13). Nothing that holds a run or a group ever needs a schedule, so firing a schedule can't deadlock with them.
 
@@ -631,6 +642,5 @@ interface WorkflowStore {
 - **A timed-out step isn't stopped.** The worker stops waiting for it, but unless the step honours `ctx.signal` its function keeps running in the background, and may overlap with its own retry.
 - **A cancelled step isn't stopped either.** Its worker hears at its next heartbeat, up to a third of the lease later, and the step's function only stops if it honours `ctx.signal`.
 - **Schedules need the orchestrator too.** While none is running, nothing fires; when one starts again, each schedule that missed ticks starts one run, not one for each.
-- **A schedule doesn't wait for its last run.** Each tick starts a run even if the one before is still going, unless the workflow's `concurrency` makes them take turns.
 
-All nine are listed in `workflowEngine/guarantees.md`.
+All eight are listed in `workflowEngine/guarantees.md`.

@@ -190,8 +190,9 @@ export interface RunDetail {
 /**
  * One entry in a run's history. `type` is one of `run_queued`, `run_waiting`, `run_admitted`, `run_started`,
  * `run_succeeded`, `run_failed`, `run_cancelled`, `step_ready`, `step_claimed`, `step_succeeded`,
- * `step_failed`, `step_skipped`, `step_lease_expired`, `run_redriven` or
- * `step_retry_scheduled`.
+ * `step_failed`, `step_skipped`, `step_lease_expired`, `run_redriven`,
+ * `step_retry_scheduled` or `schedule_tick_skipped` (a tick of the run's
+ * schedule that started nothing because this run was still going).
  */
 export interface RunEvent {
   id: string;

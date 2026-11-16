@@ -168,6 +168,14 @@ workflow already has, so creating a schedule at every startup is safe. A
 paused schedule skips its ticks. The orchestrator starts one run per tick,
 however many orchestrators are running.
 
+A schedule never has two of its runs going at once. A tick that comes due
+while the run it last started hasn't finished starts nothing, and isn't made up
+later: the schedule waits for its next tick, and the unfinished run gets a
+`schedule_tick_skipped` event naming the tick. Only the schedule's own runs
+count, not runs you start yourself or another schedule's. A run counts until it
+has succeeded, failed or been cancelled, so a run waiting in a concurrency
+group, or one you redrove, holds back the next tick too.
+
 ### Run three kinds of process
 
 They only share the database, so each can run as its own process, container
