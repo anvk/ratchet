@@ -7,7 +7,7 @@ import type {
   WorkflowStore,
 } from "./workflowEngine.types.ts";
 import { UnknownWorkflowError } from "./workflowEngine.errors.ts";
-import { assertUnique } from "./workflowEngine.utils.ts";
+import { assertUnique, nextFireAfter } from "./workflowEngine.utils.ts";
 import { runOrchestrator } from "./workflowEngine.orchestrator.ts";
 import { runWorker } from "./workflowEngine.worker.ts";
 
@@ -55,6 +55,20 @@ export function defineWorkflow<Input = unknown>(
       !(Number.isInteger(step.backoffMs) && step.backoffMs >= 0)
     ) {
       throw new Error(`${stepLabel} needs a whole backoffMs of 0 or more`);
+    }
+  }
+  if (definition.schedules) {
+    assertUnique(
+      definition.schedules.map((s) => s.name),
+      `schedule in ${definition.name}`,
+    );
+    for (const schedule of definition.schedules) {
+      try {
+        nextFireAfter({ cron: schedule.cron, after: new Date() });
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        throw new Error(`Schedule ${definition.name}/${schedule.name}: ${reason}`);
+      }
     }
   }
   return definition;

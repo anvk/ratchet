@@ -80,6 +80,16 @@ export interface WorkflowConcurrency<Input = any> {
   limit: number;
 }
 
+/** A time-based trigger for a workflow: the orchestrator starts a run each time it is due. */
+export interface WorkflowSchedule<Input = any> {
+  /** Stable identifier, unique within the workflow. */
+  name: string;
+  /** Five fields, in UTC: minute, hour, day of month, month, day of week. */
+  cron: string;
+  /** The input each of its runs starts with. */
+  input?: Input;
+}
+
 /** A workflow as its author writes it, passed to defineWorkflow. */
 export interface WorkflowDefinition<Input = any> {
   /** Stable identifier, unique within the registry. */
@@ -88,6 +98,12 @@ export interface WorkflowDefinition<Input = any> {
   concurrency?: WorkflowConcurrency<Input>;
   /** Each step is listed after the steps it needs. */
   steps: StepDefinition<Input>[];
+  /**
+   * Times at which the orchestrator starts a run of this workflow. A tick starts a
+   * run even if the last one is still going, unless `concurrency` prevents it.
+   * Schedules are not part of the workflow's version.
+   */
+  schedules?: WorkflowSchedule<Input>[];
 }
 
 /** Every workflow an engine knows about, by name. */
