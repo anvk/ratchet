@@ -202,3 +202,7 @@ The full definition is in
 [`workflowEngine/src/stores/postgres/schema.sql`](workflowEngine/src/stores/postgres/schema.sql). TypeScript types
 are generated from the live database with `kysely-codegen`, so after changing
 the schema run `pnpm db:reset` and then `pnpm db:types`.
+
+## License
+
+Apache 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
