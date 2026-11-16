@@ -90,22 +90,6 @@ export default defineWorkflow<StockReportInput>({
 });
 ```
 
-### Keep some runs from overlapping
-
-`concurrency` makes runs that share a key take turns. The key comes from the
-run's input; at most `limit` runs with the same key are in progress at once,
-and the rest wait, oldest first. A `null` key puts a run in no group:
-
-```ts
-export default defineWorkflow<StockReportInput>({
-  name: "stock-report",
-  concurrency: { key: (input) => `ticker:${input.ticker}`, limit: 1 }, // one report per ticker at a time
-  steps: [
-    // ...as above
-  ],
-});
-```
-
 ### Create the engine
 
 An engine pairs your workflows with a store, which keeps their state in
@@ -122,6 +106,22 @@ export const engine = createWorkflowEngine({
   workflows: [stockReport],
   store: createPostgresStore(), // connects to DATABASE_URL
   settings: { closeTimeoutMs: 25_000 }, // optional; see WorkflowEngineSettings
+});
+```
+
+### Keep some runs from overlapping
+
+`concurrency` makes runs that share a key take turns. The key comes from the
+run's input; at most `limit` runs with the same key are in progress at once,
+and the rest wait, oldest first. A `null` key puts a run in no group:
+
+```ts
+export default defineWorkflow<StockReportInput>({
+  name: "stock-report",
+  concurrency: { key: (input) => `ticker:${input.ticker}`, limit: 1 }, // one report per ticker at a time
+  steps: [
+    // ...as above
+  ],
 });
 ```
 
