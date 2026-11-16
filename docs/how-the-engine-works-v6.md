@@ -268,9 +268,9 @@ worker-2: (waits for the lock) lock run A. screen-sanctions done.
 
 Whoever goes second sees the first one's work, so the step that needs both is readied **exactly once**. The lock only covers one run, so different runs never wait for each other, and it lasts milliseconds.
 
-The same lock covers the other run-wide decision: "nothing can move any more, so the run is finished". Two branches ending at the same moment would otherwise each see the other still running, and the run would never be marked done. It also has to be taken in the same order everywhere, the run first and then its steps (with a concurrency group's lock in between, section 13), or two transactions could each hold the lock the other wants and wait forever (a **deadlock**). That's why the orchestrator's sweep locks the run before the expired step, too. (The one exception is claiming a run's very first step, which marks the run `running` while already holding the step. That claim never waits for the run's lock; section 11 explains why it mustn't.)
+The same lock covers the other run-wide decision: "nothing can move any more, so the run is finished". Two branches ending at the same moment would otherwise each see the other still running, and the run would never be marked done. It also has to be taken in the same order everywhere, the run first and then its steps (with a concurrency group's lock in between, section 13), or two transactions could each hold the lock the other wants and wait forever (a **deadlock**). That's why the orchestrator's sweep locks the run before the expired step, too. (The one exception is claiming a run's very first step, which marks the run `running` while already holding the step. That claim never waits for the run's lock; section 14 explains why it mustn't.)
 
-**Sticky claiming with branches:** when a worker's step readies two steps at once, the worker keeps the first and leaves the other for someone else (section 14).
+**Sticky claiming with branches:** when a worker's step readies two steps at once, the worker keeps the first and leaves the other for someone else (section 15).
 
 ---
 
@@ -318,55 +318,13 @@ As with a lost lease, the signal is only a request. If the step's function ignor
 | `attempts_exhausted` | It kept throwing until it ran out of attempts          | Fix the cause (a vendor outage, a bug), then start a new run |
 | `lost_worker`        | It kept losing its worker until it ran out of attempts | Find what kills or stalls the worker                         |
 | `unknown_step`       | No worker had code for the step                        | Deploy workers that have it                                  |
-| `cancelled`          | The step was running when its run was cancelled        | Nothing: see cancelling, below                               |
+| `cancelled`          | The step was running when its run was cancelled        | Nothing: see section 14                                      |
 
 The dashboard shows the reason next to the Failed badge.
 
-**Resuming a failed run (redrive).** Once you've fixed the cause, you don't have to start again from the beginning. `redriveRun` (the **Resume run** button on the run page) puts the run back to `running`: every step that didn't succeed goes back to `pending`, those whose needs have already succeeded become `ready`, and steps that succeeded keep their outputs and never run again. It's offered for every reason except `non_retryable`, where asking again won't change a decision, and for a run that was cancelled (below).
+**Resuming a failed run (redrive).** Once you've fixed the cause, you don't have to start again from the beginning. `redriveRun` (the **Resume run** button on the run page) puts the run back to `running`: every step that didn't succeed goes back to `pending`, those whose needs have already succeeded become `ready`, and steps that succeeded keep their outputs and never run again. It's offered for every reason except `non_retryable`, where asking again won't change a decision, and for a run that was cancelled (section 14).
 
 The resumed steps get **fresh attempts**, but their attempt numbers keep counting up: attempt 5, not attempt 1. The ownership check (section 8) matches on the attempt number, so if it started again from 1, a worker that lost its lease before the run failed, and is somehow still running, could match a new attempt and save a stale result. Instead, `prior_attempts` remembers where the redrive happened, and `maxAttempts` counts only the attempts after it.
-
-**Cancelling a run.** Sometimes you want a run to stop: it was started by mistake, or it's stuck and holding its group's slot (section 13). `cancelRun` (the **Cancel run** button on the run page) stops any run that hasn't finished, in one transaction:
-
-- steps that haven't started, `pending` or `ready`, become `skipped`;
-- a step that's `running` becomes `failed`, with the reason `cancelled`;
-- the run becomes **`cancelled`**, and its slot goes to the next waiting run.
-
-```
-receive-payment   ✅ succeeded
-validate-account  ✅ succeeded
-score-risk        ❌ failed: "Run cancelled"   (it was running)
-screen-sanctions  ❌ failed: "Run cancelled"   (it was running)
-post-ledger       – skipped
-run               cancelled
-```
-
-**Cancelled is its own status, not a kind of failure.** Nothing went wrong: someone decided. If a cancelled run were `failed`, it would sit in the Failed tab and be counted with the failures, and anyone watching for failures would be alerted by every run a colleague stopped on purpose. So a run can end three ways, `succeeded`, `failed` or `cancelled`, and the dashboard has a tab and a count for each. A cancelled run has no `failure_reason`; only the steps that were cut off do.
-
-Steps have no `cancelled` status. A step that was running when its run was cancelled really didn't finish, so it's `failed`, and its reason, `cancelled`, says it wasn't the step's fault.
-
-A cancelled run can be resumed like a failed one: **Resume run** puts back the steps that didn't succeed, cut off or skipped, and the run carries on from there.
-
-**How does the worker find out?** Nothing is sent to it. The cancelled step is no longer `running`, so the worker's next heartbeat finds nothing to renew (section 7). That is exactly what a lost lease looks like: `ctx.signal` fires, and if the step finishes anyway, its result matches nothing and is rejected (section 8). The run is over the moment you cancel; the worker hears within a third of the step's lease.
-
-**Cancelling has a deadlock to avoid.** Everything that changes a run's steps locks the run first (section 10), and so does a cancel. But a cancel is the first thing that locks a run **before it has started**, and a run's first claim takes its locks the other way round, the step and then the run:
-
-```
-worker:  claim receive-payment          holds the step, now needs the run
-cancel:  lock the run                   holds the run, now needs the step
-         → each waits for the other
-```
-
-The worker needs the run for two things, and each got its own fix:
-
-- **Marking the run `running`.** The claim only does that if the run's row is free (`SKIP LOCKED`, the trick from section 6). If a cancel holds it, the run is about to be over anyway.
-- **Writing its events.** An event row points at its run, and Postgres briefly locks the run to make sure it isn't deleted meanwhile. A cancel therefore takes a slightly weaker lock on the run, `FOR NO KEY UPDATE`: it still makes every other change to the run's steps wait, but it lets rows that merely point at the run through.
-
-The cancel then waits for the worker's claim to commit, and fails the step it just claimed. It can do that because it changes all the steps in **one statement** that decides row by row. Two statements, "skip what hasn't started" and then "fail what's running", could miss a step claimed between them, and leave it running in a finished run.
-
-Cancelling a run that is **waiting for a slot** had the same problem with the group lock: the cancel holds the run and wants the group, while a run finishing in that group holds the group and wants the waiting run, to admit it. So admission (section 13) picks and locks its candidate in one query and passes over one that's locked. A locked waiting run is one being cancelled, and the next in line should get the slot anyway.
-
-**And if a deadlock happens anyway?** Postgres never hangs on one. After a second it aborts one of the transactions involved, and the other carries on. The store runs the aborted transaction again, up to three times, after a short random wait so the two don't collide in step. That's safe because the aborted transaction was rolled back completely: the second try starts from nothing. So a deadlock nobody thought of costs a moment's delay rather than a failed cancel, and each retry is logged, so it doesn't go unnoticed.
 
 ---
 
@@ -447,13 +405,59 @@ SELECT pg_advisory_xact_lock(hashtextextended('account:acct_shared', 0));
 
 An **advisory lock** locks a number instead of a row, so a group needs no row of its own; the key is hashed into the number. The `xact` means it's released when the transaction ends, like the row locks. Whoever goes second waits, then counts the first one's run too.
 
-It fits into the lock order from section 10: **run, then group, then steps.** Finishing a run already holds that run's lock, then takes its group's. Starting a run holds no run lock yet, because the run is new. And the only runs locked while the group lock is held are waiting ones. Just one other thing can hold a waiting run, a cancel, so admission skips a waiting run that's locked instead of waiting for it (section 11).
+It fits into the lock order from section 10: **run, then group, then steps.** Finishing a run already holds that run's lock, then takes its group's. Starting a run holds no run lock yet, because the run is new. And the only runs locked while the group lock is held are waiting ones. Just one other thing can hold a waiting run, a cancel, so admission skips a waiting run that's locked instead of waiting for it (section 14).
 
 **Redrive goes through admission too.** A run that failed or was cancelled gave its slot back. Redriving it (section 11) puts it back in line: it's `queued` again, admitted at once if there's a free slot, and otherwise it waits like a new run. Without that, redrive would be a way around the limit. It keeps its original start time, so it goes ahead of runs that started waiting after it.
 
 ---
 
-## 14. Claim order: which step a worker picks next
+## 14. Cancelling a run
+
+Sometimes you want a run to stop: it was started by mistake, or it's stuck and holding its group's slot (section 13). `cancelRun` (the **Cancel run** button on the run page) stops any run that hasn't finished, in one transaction:
+
+- steps that haven't started, `pending` or `ready`, become `skipped`;
+- a step that's `running` becomes `failed`, with the reason `cancelled`;
+- the run becomes **`cancelled`**, and its slot goes to the next waiting run.
+
+```
+receive-payment   ✅ succeeded
+validate-account  ✅ succeeded
+score-risk        ❌ failed: "Run cancelled"   (it was running)
+screen-sanctions  ❌ failed: "Run cancelled"   (it was running)
+post-ledger       – skipped
+run               cancelled
+```
+
+**Cancelled is its own status, not a kind of failure.** Nothing went wrong: someone decided. If a cancelled run were `failed`, it would sit in the Failed tab and be counted with the failures, and anyone watching for failures would be alerted by every run a colleague stopped on purpose. So a run can end three ways, `succeeded`, `failed` or `cancelled`, and the dashboard has a tab and a count for each. A cancelled run has no `failure_reason`; only the steps that were cut off do.
+
+Steps have no `cancelled` status. A step that was running when its run was cancelled really didn't finish, so it's `failed`, and its reason, `cancelled`, says it wasn't the step's fault.
+
+A cancelled run can be resumed like a failed one: **Resume run** puts back the steps that didn't succeed, cut off or skipped, and the run carries on from there.
+
+**How does the worker find out?** Nothing is sent to it. The cancelled step is no longer `running`, so the worker's next heartbeat finds nothing to renew (section 7). That is exactly what a lost lease looks like: `ctx.signal` fires, and if the step finishes anyway, its result matches nothing and is rejected (section 8). The run is over the moment you cancel; the worker hears within a third of the step's lease.
+
+**Cancelling has a deadlock to avoid.** Everything that changes a run's steps locks the run first (section 10), and so does a cancel. But a cancel is the first thing that locks a run **before it has started**, and a run's first claim takes its locks the other way round, the step and then the run:
+
+```
+worker:  claim receive-payment          holds the step, now needs the run
+cancel:  lock the run                   holds the run, now needs the step
+         → each waits for the other
+```
+
+The worker needs the run for two things, and each got its own fix:
+
+- **Marking the run `running`.** The claim only does that if the run's row is free (`SKIP LOCKED`, the trick from section 6). If a cancel holds it, the run is about to be over anyway.
+- **Writing its events.** An event row points at its run, and Postgres briefly locks the run to make sure it isn't deleted meanwhile. A cancel therefore takes a slightly weaker lock on the run, `FOR NO KEY UPDATE`: it still makes every other change to the run's steps wait, but it lets rows that merely point at the run through.
+
+The cancel then waits for the worker's claim to commit, and fails the step it just claimed. It can do that because it changes all the steps in **one statement** that decides row by row. Two statements, "skip what hasn't started" and then "fail what's running", could miss a step claimed between them, and leave it running in a finished run.
+
+Cancelling a run that is **waiting for a slot** had the same problem with the group lock: the cancel holds the run and wants the group, while a run finishing in that group holds the group and wants the waiting run, to admit it. So admission (section 13) picks and locks its candidate in one query and passes over one that's locked. A locked waiting run is one being cancelled, and the next in line should get the slot anyway.
+
+**And if a deadlock happens anyway?** Postgres never hangs on one. After a second it aborts one of the transactions involved, and the other carries on. The store runs the aborted transaction again, up to three times, after a short random wait so the two don't collide in step. That's safe because the aborted transaction was rolled back completely: the second try starts from nothing. So a deadlock nobody thought of costs a moment's delay rather than a failed cancel, and each retry is logged, so it doesn't go unnoticed.
+
+---
+
+## 15. Claim order: which step a worker picks next
 
 When several steps are ready, which one does a worker take? That's the `claimOrder` setting (`workflows/engine.ts`):
 
@@ -465,7 +469,7 @@ Every step is still saved separately, with its own lease, in all three modes. `s
 
 ---
 
-## 15. Shutting down gracefully
+## 16. Shutting down gracefully
 
 When you press Ctrl+C on a worker (`closeOnSignals`):
 
@@ -477,7 +481,7 @@ In the last two cases the step it abandoned keeps its lease until the lease runs
 
 ---
 
-## 16. The store interface: why Postgres is swappable
+## 17. The store interface: why Postgres is swappable
 
 The engine never writes SQL itself. It only talks to a `WorkflowStore` interface (`workflowEngine.types.ts`):
 
@@ -496,7 +500,7 @@ interface WorkflowStore {
 
 ---
 
-## 17. The whole picture
+## 18. The whole picture
 
 ```
  Dashboard ──HTTP──▶ API ──startRun──▶ ┌──────────── Postgres ────────────┐
