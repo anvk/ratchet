@@ -270,7 +270,7 @@ Whoever goes second sees the first one's work, so the step that needs both is re
 
 The same lock covers the other run-wide decision: "nothing can move any more, so the run is finished". Two branches ending at the same moment would otherwise each see the other still running, and the run would never be marked done. It also has to be taken in the same order everywhere, the run first and then its steps (with a concurrency group's lock in between, section 13), or two transactions could each hold the lock the other wants and wait forever (a **deadlock**). That's why the orchestrator's sweep locks the run before the expired step, too. (The one exception is claiming a run's very first step, which marks the run `running` while already holding the step. That claim never waits for the run's lock; section 14 explains why it mustn't.)
 
-**Sticky claiming with branches:** when a worker's step readies two steps at once, the worker keeps the first and leaves the other for someone else (section 15).
+**Sticky claiming with branches:** when a worker's step readies two steps at once, the worker keeps the first and leaves the other for someone else (section 16).
 
 ---
 
@@ -453,11 +453,45 @@ The cancel then waits for the worker's claim to commit, and fails the step it ju
 
 Cancelling a run that is **waiting for a slot** had the same problem with the group lock: the cancel holds the run and wants the group, while a run finishing in that group holds the group and wants the waiting run, to admit it. So admission (section 13) picks and locks its candidate in one query and passes over one that's locked. A locked waiting run is one being cancelled, and the next in line should get the slot anyway.
 
-**And if a deadlock happens anyway?** Postgres never hangs on one. After a second it aborts one of the transactions involved, and the other carries on. The store runs the aborted transaction again, up to three times, after a short random wait so the two don't collide in step. That's safe because the aborted transaction was rolled back completely: the second try starts from nothing. So a deadlock nobody thought of costs a moment's delay rather than a failed cancel, and each retry is logged, so it doesn't go unnoticed.
+These are the deadlocks that were found. Section 15 covers what happens if there is one that wasn't.
 
 ---
 
-## 15. Claim order: which step a worker picks next
+## 15. Deadlocks: when two transactions wait for each other
+
+A **deadlock** is two transactions that each hold something the other needs:
+
+```
+cancel:  holds the run,   wants the step
+worker:  holds the step,  wants the run
+```
+
+Neither can move, and neither is doing anything wrong. They arrived in the same few milliseconds, in an unlucky order. The engine deals with deadlocks in three layers.
+
+**1. Avoid them: one lock order.** A deadlock needs a circle of waiting. If every transaction takes its locks in the same order, there can't be one, because nobody ever holds a later lock while waiting for an earlier one. The engine's order is **run, then group, then steps** (sections 10 and 13). The few places that can't follow it never wait instead: a run's first claim and the admission of a waiting run both skip a row that's locked (section 14).
+
+**2. Postgres breaks them.** That reasoning covers the paths someone thought about. For the rest, Postgres never lets a deadlock hang. After a second of waiting it looks for a circle, and if it finds one it aborts one of the transactions, undoes everything it did, and lets the other carry on.
+
+**3. The store runs the aborted transaction again.** Up to three more times, each after a short random wait. With the pair above:
+
+```
+0.00s  a cancel and a worker's claim deadlock
+1.00s  Postgres aborts the cancel; the claim commits and lets go of the step
+1.03s  the store runs the cancel again: nothing is in its way
+       → it sees the step the worker just claimed, fails it, and cancels the run
+```
+
+**Why does trying again work?** Because a deadlock is an accident of timing, not something wrong with either transaction. By the time the aborted one runs again, the other has finished and released what it held. The second try also reads the data as it is by then, so it decides afresh instead of repeating a stale decision: in the example, it finds the step `running` and fails it.
+
+**Why is it safe?** The aborted transaction was rolled back completely, so the second try starts from nothing. That relies on one rule: a transaction in the store does nothing outside the database before it commits.
+
+**Why only deadlocks?** Any other error, such as a broken rule in the data or a workflow that doesn't exist, would fail the same way again. Retrying it would only delay the bad news.
+
+**Why stop after three?** The random wait keeps the two transactions from colliding again in step. A deadlock that still comes back after three tries isn't an accident, so the error is passed on where someone will see it. Every retry is logged for the same reason: a deadlock should cost a second, not go unnoticed.
+
+---
+
+## 16. Claim order: which step a worker picks next
 
 When several steps are ready, which one does a worker take? That's the `claimOrder` setting (`workflows/engine.ts`):
 
@@ -469,7 +503,7 @@ Every step is still saved separately, with its own lease, in all three modes. `s
 
 ---
 
-## 16. Shutting down gracefully
+## 17. Shutting down gracefully
 
 When you press Ctrl+C on a worker (`closeOnSignals`):
 
@@ -481,7 +515,7 @@ In the last two cases the step it abandoned keeps its lease until the lease runs
 
 ---
 
-## 17. The store interface: why Postgres is swappable
+## 18. The store interface: why Postgres is swappable
 
 The engine never writes SQL itself. It only talks to a `WorkflowStore` interface (`workflowEngine.types.ts`):
 
@@ -500,7 +534,7 @@ interface WorkflowStore {
 
 ---
 
-## 18. The whole picture
+## 19. The whole picture
 
 ```
  Dashboard ──HTTP──▶ API ──startRun──▶ ┌──────────── Postgres ────────────┐
