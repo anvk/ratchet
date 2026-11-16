@@ -14,6 +14,8 @@ export const engine = createWorkflowEngine({
     claimOrder: "sticky",
     // Steps can set their own leaseMs; this is the default.
     leaseMs: 30_000,
+    // Required. Steps can set their own timeoutMs; this is the limit for the rest.
+    timeoutMs: 60_000,
     sweepIntervalMs: 1000,
   },
 });

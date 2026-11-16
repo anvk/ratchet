@@ -13,7 +13,7 @@ import { slow, workflows } from "./fixtures/workflows.ts";
 const orchestrator = createWorkflowEngine({
   workflows,
   store: { ...store, close: async () => {} },
-  settings: { sweepIntervalMs: 50 },
+  settings: { timeoutMs: 60_000, sweepIntervalMs: 50 },
 });
 
 before(async () => {

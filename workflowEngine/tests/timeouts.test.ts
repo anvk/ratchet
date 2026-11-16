@@ -13,11 +13,18 @@ import { stalling } from "./fixtures/workflows.ts";
 before(() => startWorkers(2));
 after(() => stopWorkers());
 
-/** Runs a one-step workflow once on a worker over a fake store, and returns what the store saw. */
-async function runOnce(step: Omit<StepDefinition, "name">) {
+/**
+ * Runs a one-step workflow once on a worker over a fake store, and returns what
+ * the store saw. `engineTimeoutMs` is the engine's setting, for steps without their own.
+ */
+async function runOnce(step: Omit<StepDefinition, "name">, engineTimeoutMs = 60_000) {
   const wf = defineWorkflow({ name: "timed", steps: [{ name: "timed", ...step }] });
   const { store: fake, calls } = fakeStore({ workflow: "timed" });
-  const engine = createWorkflowEngine({ workflows: [wf], store: fake, settings: { pollMs: 5 } });
+  const engine = createWorkflowEngine({
+    workflows: [wf],
+    store: fake,
+    settings: { timeoutMs: engineTimeoutMs, pollMs: 5 },
+  });
   const worker = engine.runWorker();
   return { engine, worker, calls };
 }
@@ -110,17 +117,39 @@ test("what a timed-out step throws later doesn't crash the worker", async () => 
   }
 });
 
-test("a step without a timeout runs as long as it needs", async () => {
-  const { engine, worker, calls } = await runOnce({
-    async run() {
-      await sleep(200);
-      return "slow";
+test("a step without its own timeout gets the engine's", async () => {
+  const { engine, worker, calls } = await runOnce({ run: (ctx) => aborted(ctx.signal) }, 50);
+  await until(() => calls.failures.length > 0);
+  await engine.close();
+  await worker;
+  assert.deepEqual(calls.failures, [{ error: "Timed out after 50ms", final: null }]);
+});
+
+test("a step's own timeout wins over the engine's", async () => {
+  const { engine, worker, calls } = await runOnce(
+    {
+      timeoutMs: 1000,
+      async run() {
+        await sleep(200);
+        return "slow";
+      },
     },
-  });
+    50,
+  );
   await until(() => calls.completed > 0);
   await engine.close();
   await worker;
   assert.equal(calls.failures.length, 0);
+});
+
+test("an engine can't be created without a whole, positive timeoutMs", () => {
+  const { store: fake } = fakeStore({ workflow: "timed" });
+  const create = (settings: object) =>
+    createWorkflowEngine({ workflows: [], store: fake, settings: settings as never });
+  for (const settings of [{}, { timeoutMs: 0 }, { timeoutMs: -1 }, { timeoutMs: 1.5 }]) {
+    assert.throws(() => create(settings), /needs a whole, positive timeoutMs setting/);
+  }
+  assert.doesNotThrow(() => create({ timeoutMs: 1 }));
 });
 
 /** A run's one step and its retry events. */
@@ -182,8 +211,16 @@ test("changing a step's timeoutMs does not create a new version", async () => {
       name: "timeout-versioned",
       steps: [{ name: "only", timeoutMs, run: async () => null }],
     });
-  await createWorkflowEngine({ workflows: [withTimeout(1000)], store }).sync();
-  await createWorkflowEngine({ workflows: [withTimeout(2000)], store }).sync();
+  await createWorkflowEngine({
+    workflows: [withTimeout(1000)],
+    store,
+    settings: { timeoutMs: 60_000 },
+  }).sync();
+  await createWorkflowEngine({
+    workflows: [withTimeout(2000)],
+    store,
+    settings: { timeoutMs: 60_000 },
+  }).sync();
   const versions = await db
     .selectFrom("workflows")
     .select("id")

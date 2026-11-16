@@ -127,7 +127,12 @@ test("runs without a key are never treated as duplicates", async () => {
 
 test("an engine rejects two workflows with the same name", () => {
   assert.throws(
-    () => createWorkflowEngine({ workflows: [pipeline, pipeline], store }),
+    () =>
+      createWorkflowEngine({
+        workflows: [pipeline, pipeline],
+        store,
+        settings: { timeoutMs: 60_000 },
+      }),
     /Duplicate workflow: pipeline/,
   );
 });
@@ -215,7 +220,7 @@ test("editing a workflow leaves earlier runs on the version they started with", 
 });
 
 test("engine.startRun starts a run by workflow name, and rejects a name it doesn't have", async () => {
-  const engine = createWorkflowEngine({ workflows, store });
+  const engine = createWorkflowEngine({ workflows, store, settings: { timeoutMs: 60_000 } });
   const runId = await engine.startRun({ workflow: "pipeline", input: {} });
   await waitForFinish([runId]);
   const run = await db

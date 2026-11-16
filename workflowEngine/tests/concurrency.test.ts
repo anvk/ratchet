@@ -32,7 +32,11 @@ const groupColumns = (runId: string) =>
 
 /** Starts a run of the grouped workflow through an engine, the way an application would. */
 async function startGrouped(input: GroupedInput) {
-  const engine = createWorkflowEngine({ workflows: [grouped], store });
+  const engine = createWorkflowEngine({
+    workflows: [grouped],
+    store,
+    settings: { timeoutMs: 60_000 },
+  });
   await engine.sync();
   return engine.startRun({ workflow: "concurrency-grouped", input });
 }
@@ -80,8 +84,16 @@ test("changing a workflow's concurrency limit does not create a new version", as
       concurrency: { key: () => "a", limit },
       steps: [{ name: "only", run: async () => null }],
     });
-  await createWorkflowEngine({ workflows: [withLimit(2)], store }).sync();
-  await createWorkflowEngine({ workflows: [withLimit(3)], store }).sync();
+  await createWorkflowEngine({
+    workflows: [withLimit(2)],
+    store,
+    settings: { timeoutMs: 60_000 },
+  }).sync();
+  await createWorkflowEngine({
+    workflows: [withLimit(3)],
+    store,
+    settings: { timeoutMs: 60_000 },
+  }).sync();
   const versions = await db
     .selectFrom("workflows")
     .select("id")
@@ -99,7 +111,11 @@ interface GroupRunInput {
 
 /** Starts a run of a fixture workflow through an engine, so its concurrency key is computed. */
 async function startFixture(workflow: "exclusive" | "paired", input: GroupRunInput) {
-  const engine = createWorkflowEngine({ workflows: [exclusive, paired], store });
+  const engine = createWorkflowEngine({
+    workflows: [exclusive, paired],
+    store,
+    settings: { timeoutMs: 60_000 },
+  });
   return engine.startRun({ workflow, input });
 }
 

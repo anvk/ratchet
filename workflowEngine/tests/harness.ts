@@ -36,7 +36,11 @@ async function resetDatabase() {
 /** Workers are real separate processes, so they compete the way they do in production. */
 export async function startWorkers(count: number) {
   await resetDatabase();
-  await createWorkflowEngine({ workflows: [...workflows, ...scheduledWorkflows], store }).sync();
+  await createWorkflowEngine({
+    workflows: [...workflows, ...scheduledWorkflows],
+    store,
+    settings: { timeoutMs: 60_000 },
+  }).sync();
   for (let i = 1; i <= count; i++) {
     const worker = spawn(process.execPath, ["--import", "tsx", WORKER], {
       env: { ...process.env, WORKER_ID: `test-worker-${i}` },

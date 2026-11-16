@@ -66,10 +66,12 @@ const startCancellable = (input: { ms?: number; untilSignal?: boolean }) =>
 
 /** Starts a run of the exclusive fixture through an engine, so its concurrency key is computed. */
 const startExclusive = (input: { group: string; ms?: number }) =>
-  createWorkflowEngine({ workflows: [exclusive], store }).startRun({
-    workflow: "exclusive",
-    input,
-  });
+  createWorkflowEngine({ workflows: [exclusive], store, settings: { timeoutMs: 60_000 } }).startRun(
+    {
+      workflow: "exclusive",
+      input,
+    },
+  );
 
 /** Waits until a run's `work` step is running. */
 const waitForWork = (runId: string) =>
@@ -79,7 +81,11 @@ const waitForWork = (runId: string) =>
   );
 
 test("cancelling a run nobody has started skips every step", async () => {
-  await createWorkflowEngine({ workflows: [unclaimed], store }).sync();
+  await createWorkflowEngine({
+    workflows: [unclaimed],
+    store,
+    settings: { timeoutMs: 60_000 },
+  }).sync();
   const runId = await store.startRun({ definition: unclaimed });
 
   assert.equal(await store.cancelRun({ runId }), true);

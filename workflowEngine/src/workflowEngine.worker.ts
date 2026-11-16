@@ -44,11 +44,10 @@ function startHeartbeat({
 
 /**
  * Starts the clock on one attempt. `signal` fires once `timeoutMs` has passed,
- * unless stopped first. Without a limit it never fires and nothing is scheduled.
+ * unless stopped first.
  */
-function startTimeout(timeoutMs: number | undefined) {
+function startTimeout(timeoutMs: number) {
   const timedOut = new AbortController();
-  if (timeoutMs === undefined) return { signal: timedOut.signal, stop: () => {} };
   const timer = setTimeout(() => timedOut.abort(), timeoutMs);
   return { signal: timedOut.signal, stop: () => clearTimeout(timer) };
 }
@@ -56,9 +55,9 @@ function startTimeout(timeoutMs: number | undefined) {
 /**
  * Runs one claimed step, sending heartbeats while it runs, and records whether
  * it succeeded or failed. A NonRetryableError fails it for good; any other
- * error is retried while it has attempts left. A step with a `timeoutMs` that
- * runs past it is no longer waited for: its signal fires and the attempt fails
- * like a thrown error. Returns the run's next step if the store handed it
+ * error is retried while it has attempts left. An attempt that runs past
+ * `timeoutMs` (the step's own, or the engine's) is no longer waited for: its
+ * signal fires and the attempt fails like a thrown error. Returns the run's next step if the store handed it
  * straight to this worker.
  */
 async function executeStep({
@@ -68,6 +67,7 @@ async function executeStep({
   claim,
   claimNext,
   defaults,
+  defaultTimeoutMs,
 }: {
   registry: Registry;
   store: WorkflowStore;
@@ -75,6 +75,8 @@ async function executeStep({
   claim: Claim;
   claimNext: boolean;
   defaults: StepDefaults;
+  /** The engine's timeoutMs, for a step that doesn't set its own. */
+  defaultTimeoutMs: number;
 }): Promise<Claim | null> {
   const step = registry.get(claim.workflow)?.steps.find((s) => s.name === claim.stepName);
   if (!step) {
@@ -89,7 +91,8 @@ async function executeStep({
   }
 
   const heartbeat = startHeartbeat({ store, workerId, claim });
-  const timeout = startTimeout(step.timeoutMs);
+  const timeoutMs = step.timeoutMs ?? defaultTimeoutMs;
+  const timeout = startTimeout(timeoutMs);
   let output: unknown;
   try {
     // Wrapped, so a step that returns a plain value instead of a promise still works.
@@ -110,7 +113,7 @@ async function executeStep({
     const expired = new Promise<never>((_, reject) => {
       timeout.signal.addEventListener(
         "abort",
-        () => reject(new Error(`Timed out after ${step.timeoutMs}ms`)),
+        () => reject(new Error(`Timed out after ${timeoutMs}ms`)),
         { once: true },
       );
     });
@@ -203,6 +206,7 @@ export async function runWorker({
           claim,
           claimNext,
           defaults,
+          defaultTimeoutMs: settings.timeoutMs,
         });
       }
     } catch (err) {

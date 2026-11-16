@@ -39,10 +39,11 @@ What the engine promises. Each guarantee is backed by a test in
 - **Every step has a limit on attempts.** Its own `maxAttempts`, or the
   engine's default. Errors and lost leases both use up attempts, so a step that
   keeps crashing its worker stops too.
-- **A step attempt is given up on after its `timeoutMs`.** The worker fires
-  `ctx.signal`, stops waiting for the step, and records a failed attempt, which
-  is retried like any other error while attempts are left. Steps without
-  `timeoutMs` have no limit.
+- **Every step attempt has a time limit.** The step's own `timeoutMs`, or the
+  engine's, which has no default: an engine can't be created without one. When
+  the limit passes, the worker fires `ctx.signal`, stops waiting for the step,
+  and records a failed attempt, which is retried like any other error while
+  attempts are left.
 - **A step that fails for good only stops what depends on it.** Steps that
   depend on it, directly or not, become `skipped`. Every other step carries
   on: running steps finish and ready steps still start. Once nothing can move,
@@ -121,8 +122,6 @@ What the engine promises. Each guarantee is backed by a test in
 - **A running step hears about a cancel at its next heartbeat,** up to a third
   of its lease later, and its function isn't stopped. Unless it honours
   `ctx.signal` it keeps running until it returns, and its result is discarded.
-- **A step without `timeoutMs` that never returns runs forever,** for as long as
-  its worker stays alive.
 - **A failed run ends only when its last running step does,** since steps
   that don't depend on the failure finish first.
 - **A version covers the plan, not the code.** Editing only the code inside a

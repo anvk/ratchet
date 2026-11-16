@@ -40,8 +40,12 @@ export const REDRIVABLE_FAILURE_REASONS: readonly FailureReason[] = [
   "unknown_step",
 ];
 
-/** The settings an engine uses for anything createWorkflowEngine isn't given. */
-export const DEFAULT_ENGINE_SETTINGS: WorkflowEngineSettings = {
+/**
+ * The settings an engine uses for anything createWorkflowEngine isn't given.
+ * `timeoutMs` has no default: no one number suits every app's steps, so
+ * createWorkflowEngine requires it.
+ */
+export const DEFAULT_ENGINE_SETTINGS: Omit<WorkflowEngineSettings, "timeoutMs"> = {
   /** Idle workers ask for work 4 times a second: quick to react, light on the database. */
   pollMs: 250,
   /** After an unexpected error, wait a second so a database outage isn't hammered. */

@@ -81,8 +81,9 @@ function concurrencyFor({
 }
 
 /**
- * Creates an engine from its workflows, storage and settings. Several engines
- * can run side by side, each only claiming work from its own workflows.
+ * Creates an engine from its workflows, storage and settings. Every setting
+ * has a default except `timeoutMs`, which must be given. Several engines can
+ * run side by side, each only claiming work from its own workflows.
  */
 export function createWorkflowEngine({
   workflows,
@@ -91,8 +92,12 @@ export function createWorkflowEngine({
 }: {
   workflows: WorkflowDefinition[];
   store: WorkflowStore;
-  settings?: Partial<WorkflowEngineSettings>;
+  settings: Partial<WorkflowEngineSettings> & Pick<WorkflowEngineSettings, "timeoutMs">;
 }): WorkflowEngine {
+  // The type already requires it; this is for callers that aren't type-checked.
+  if (!(Number.isInteger(overrides.timeoutMs) && overrides.timeoutMs > 0)) {
+    throw new Error("An engine needs a whole, positive timeoutMs setting");
+  }
   assertUnique(
     workflows.map((w) => w.name),
     "workflow",

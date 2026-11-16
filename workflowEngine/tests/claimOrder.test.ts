@@ -32,7 +32,7 @@ async function claimsWith({
   const engine = createWorkflowEngine({
     workflows,
     store: { ...store, close: async () => {} },
-    settings: { pollMs: 5, claimOrder: order },
+    settings: { timeoutMs: 60_000, pollMs: 5, claimOrder: order },
   });
   for (let i = 1; i <= workerCount; i++) void engine.runWorker({ workerId: `worker-${i}` });
   await waitForFinish(runIds);

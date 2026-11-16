@@ -105,9 +105,13 @@ import stockReport from "./stockReport.ts";
 export const engine = createWorkflowEngine({
   workflows: [stockReport],
   store: createPostgresStore(), // connects to DATABASE_URL
-  settings: { closeTimeoutMs: 25_000 }, // optional; see WorkflowEngineSettings
+  settings: { timeoutMs: 60_000 }, // the rest are optional; see WorkflowEngineSettings
 });
 ```
+
+`timeoutMs` is how long one attempt of a step may run before the worker gives
+up on it. It is the one setting without a default, so no step can hang forever
+without someone having chosen its limit. A step can set its own `timeoutMs`.
 
 ### Keep some runs from overlapping
 
