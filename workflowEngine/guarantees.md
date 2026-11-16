@@ -3,6 +3,10 @@
 What the engine promises. Each guarantee is backed by a test in
 `workflowEngine/tests/`.
 
+The guarantees about recovering lost steps and about schedules are kept by the
+orchestrator, so they hold while at least one orchestrator is running. Workers
+only claim and run steps.
+
 - **One worker holds a step at a time.** Competing workers never claim the same
   step at once.
 - **A worker only runs steps it has the same code for.** A run belongs to the
@@ -146,16 +150,12 @@ What the engine promises. Each guarantee is backed by a test in
   version when its plan or its `version` changes. If you edit the code inside
   a step's `run` and leave `version` as it was, workers with either code claim
   the same runs.
-- **Lost leases are only recovered while an orchestrator is running.** Without
-  one, steps whose lease expired stay `running`.
 - **A step that blocks the event loop for longer than its lease loses it,**
   because heartbeats can't run. Give heavy synchronous steps a longer `leaseMs`.
 - **A run that never finishes keeps its concurrency slot.** If no worker can
   claim its steps (for example, no worker has its version), it stays in
   progress, and the runs waiting behind it in its group wait too, until someone
   cancels it.
-- **Schedules only fire while an orchestrator is running.** Without one, nothing
-  starts a scheduled run.
 - **A new database has no schedules.** They live only in the database, so
   something has to create them.
 - **Schedule times are UTC and to the minute,** and a run starts up to
