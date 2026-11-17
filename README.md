@@ -33,10 +33,10 @@ to show it running; none of the demo is needed to use the engine.
 
 **The engine**
 
-| Path              | What's there                                                                                                                                                                                               |
-| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `workflowEngine/` | Workers, the orchestrator, leases, retries, concurrency groups, schedules, the registry and the `WorkflowStore` interface, with Postgres in `src/stores/postgres/`. What it promises is in `guarantees.md` |
-| `docs/`           | Walkthroughs of how the engine works, for newcomers. `how-the-engine-works-v7.md` describes the current engine                                                                                             |
+| Path              | What's there                                                                                                                                                                                                                                                                                |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `workflowEngine/` | Workers, the orchestrator, leases, retries, concurrency groups, schedules, the registry, the `WorkflowStore` interface, with Postgres in `src/stores/postgres/`, and the `MessageBroker` interface, with Postgres in `src/messageBrokers/postgres/`. What it promises is in `guarantees.md` |
+| `docs/`           | Walkthroughs of how the engine works, for newcomers. `how-the-engine-works-v7.md` describes the current engine                                                                                                                                                                              |
 
 **Demo only**
 
@@ -96,18 +96,21 @@ export default defineWorkflow<StockReportInput>({
 ### Create the engine
 
 An engine pairs your workflows with a store, which keeps their state in
-Postgres. Put it in one module that every process imports, so they all agree
-on the workflows and settings:
+Postgres, and a message broker, which tells workers when there is work. Put it
+in one module that every process imports, so they all agree on the workflows
+and settings:
 
 ```ts
 // engine.ts
 import { createWorkflowEngine } from "@ratchet/engine";
+import { createPostgresMessageBroker } from "@ratchet/engine/messageBrokers/postgres";
 import { createPostgresStore } from "@ratchet/engine/postgres";
 import stockReport from "./stockReport.ts";
 
 export const engine = createWorkflowEngine({
   workflows: [stockReport],
   store: createPostgresStore(), // connects to DATABASE_URL
+  messageBroker: createPostgresMessageBroker(), // LISTEN/NOTIFY on the same database
   settings: { timeoutMs: 60_000 }, // the rest are optional; see WorkflowEngineSettings
 });
 ```
@@ -115,6 +118,44 @@ export const engine = createWorkflowEngine({
 `timeoutMs` is how long one attempt of a step may run before the worker gives
 up on it. It is the one setting without a default, so no step can hang forever
 without someone having chosen its limit. A step can set its own `timeoutMs`.
+
+### Messages, the outbox and the relay
+
+A worker claims steps until there are none, then waits to be told there is
+work. The message broker is what tells it.
+
+```
+store ──(same transaction)──▶ outbox ──(orchestrator's relay)──▶ message broker ──▶ workers
+```
+
+- The store saves a message in its `outbox` table in the same transaction as
+  the change it is about: `step_ready` when a step becomes claimable
+  (for a retry, held back until its backoff is over), `run_cancelled` when a
+  run with a running step is cancelled.
+- The orchestrator publishes what is waiting every `relayIntervalMs` (100ms)
+  and deletes it once published. A broker that is down delays messages; it
+  never loses them. A message can arrive twice.
+- A worker that gets `step_ready` claims at once. One that gets
+  `run_cancelled` for its run asks the store whether it still owns its step, and
+  fires `ctx.signal` if not.
+
+A message is only a hint: the store still decides who gets a step.
+
+| Broker                                    | How workers hear about work                                                                             |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `createPostgresMessageBroker()`           | Postgres `LISTEN`/`NOTIFY`, within about a tenth of a second. Nothing to run beside the database        |
+| `createPollingMessageBroker({ everyMs })` | A timer: each worker asks the store every `everyMs` (250 by default). Carries nothing between processes |
+
+Workers have no timer of their own. The Postgres broker also tells them to
+look every 30 seconds whatever it has heard (`everyMs`), so a message that goes
+missing makes a step late, not stuck; without an orchestrator to relay, that is
+the only time they look. With the polling broker, workers need no orchestrator
+to find work, and hear about a cancel at their next heartbeat.
+
+To use another broker, implement `MessageBroker` (`publish`, `subscribe`,
+`close`). It must tell its subscribers `step_ready` after any interruption in
+which it could have missed a message, as the Postgres one does when it
+reconnects.
 
 ### Keep some runs from overlapping
 
@@ -212,7 +253,7 @@ await engine.close();
 ```
 
 **One orchestrator**, which must be running: it is the only process that
-recovers lost steps and fires schedules. It gives a step to another worker
+recovers lost steps, fires schedules and relays messages to workers. It gives a step to another worker
 when its worker stops sending heartbeats, for example because it crashed, and
 starts a run each time a schedule is due. It starts runs, so it calls `sync()`
 too.
@@ -243,8 +284,13 @@ Workers don't call `sync()`.
   lease expires.
 - A second orchestrator is safe: a lease is swept once and a schedule fires
   once, whichever of them gets there first.
-- Each process keeps up to 10 Postgres connections. Keep processes × 10 under
-  Postgres's `max_connections`.
+- Each process keeps up to 10 Postgres connections for the store. The Postgres
+  message broker adds one for publishing, in an orchestrator, and one for
+  listening, in a worker. Keep processes × 11 under Postgres's
+  `max_connections`.
+- The listening connection must reach Postgres directly. A pooler that hands
+  out connections per transaction, such as PgBouncer in transaction mode, can't
+  deliver notifications.
 
 The `workflows/` folder is a working example of this setup, with the
 dashboard on top.
@@ -259,6 +305,7 @@ dashboard on top.
 | `workflow_runs` | One row each time a workflow is started, with the version it started on |
 | `step_runs`     | Progress of each step in a run; workers claim from here                 |
 | `events`        | Append-only history of every state change                               |
+| `outbox`        | Messages waiting to be published to the message broker                  |
 
 The full definition is in
 [`workflowEngine/src/stores/postgres/schema.sql`](workflowEngine/src/stores/postgres/schema.sql). TypeScript types

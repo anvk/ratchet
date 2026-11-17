@@ -4,13 +4,19 @@ import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { sql } from "kysely";
-import { createWorkflowEngine, defineWorkflow, type StepDefaults } from "../src/index.ts";
+import {
+  createWorkflowEngine,
+  createPollingMessageBroker,
+  defineWorkflow,
+  type StepDefaults,
+} from "../src/index.ts";
 import { db } from "../src/stores/postgres/index.ts";
 import { slow, workflows } from "./fixtures/workflows.ts";
 
 // Real worker processes run the steps. The orchestrator runs here, sweeping
 // often, and shares the store, which must stay open for the other tests.
 const orchestrator = createWorkflowEngine({
+  messageBroker: createPollingMessageBroker(),
   workflows,
   store: { ...store, close: async () => {} },
   settings: { timeoutMs: 60_000, sweepIntervalMs: 50 },

@@ -18,6 +18,10 @@ export function fakeStore({
     claims: 0,
     completed: 0,
     closed: 0,
+    /** How many times a worker asked whether it still owns its step. */
+    heartbeats: 0,
+    /** What the store answers to that. Set it to false to take the step away. */
+    owned: true,
     /** How many schedule methods the engine called on the store. */
     scheduleCalls: 0,
     /** The output of each completeStep call, in order. */
@@ -53,7 +57,10 @@ export function fakeStore({
       calls.failures.push({ error, final });
       return { recorded: true, retryInMs: null, failureReason: "non_retryable" };
     },
-    extendLease: async () => true,
+    extendLease: async () => {
+      calls.heartbeats++;
+      return calls.owned;
+    },
     redriveRun: async () => false,
     cancelRun: async () => false,
     sweepExpiredLeases: async () => 0,
@@ -74,6 +81,7 @@ export function fakeStore({
       return true;
     },
     fireDueSchedules: async () => 0,
+    relayMessages: async () => 0,
     close: async () => {
       calls.closed++;
     },

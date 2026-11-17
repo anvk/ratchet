@@ -2,7 +2,7 @@ import { startWorkers, stopWorkers, store, waitForFinish } from "./harness.ts";
 
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
-import { createWorkflowEngine, defineWorkflow } from "../src/index.ts";
+import { createWorkflowEngine, createPollingMessageBroker, defineWorkflow } from "../src/index.ts";
 import { db } from "../src/stores/postgres/index.ts";
 import { exclusive, paired, pipeline } from "./fixtures/workflows.ts";
 
@@ -34,6 +34,7 @@ const groupColumns = (runId: string) =>
 /** Starts a run of the grouped workflow through an engine, the way an application would. */
 async function startGrouped(input: GroupedInput) {
   const engine = createWorkflowEngine({
+    messageBroker: createPollingMessageBroker(),
     workflows: [grouped],
     store,
     settings: { timeoutMs: 60_000 },
@@ -88,11 +89,13 @@ test("changing a workflow's concurrency limit does not create a new version", as
       steps: [{ name: "only", run: async () => null }],
     });
   await createWorkflowEngine({
+    messageBroker: createPollingMessageBroker(),
     workflows: [withLimit(2)],
     store,
     settings: { timeoutMs: 60_000 },
   }).sync();
   await createWorkflowEngine({
+    messageBroker: createPollingMessageBroker(),
     workflows: [withLimit(3)],
     store,
     settings: { timeoutMs: 60_000 },
@@ -115,6 +118,7 @@ interface GroupRunInput {
 /** Starts a run of a fixture workflow through an engine, so its concurrency key is computed. */
 async function startFixture(workflow: "exclusive" | "paired", input: GroupRunInput) {
   const engine = createWorkflowEngine({
+    messageBroker: createPollingMessageBroker(),
     workflows: [exclusive, paired],
     store,
     settings: { timeoutMs: 60_000 },

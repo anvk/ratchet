@@ -46,8 +46,6 @@ export const REDRIVABLE_FAILURE_REASONS: readonly FailureReason[] = [
  * createWorkflowEngine requires it.
  */
 export const DEFAULT_ENGINE_SETTINGS: Omit<WorkflowEngineSettings, "timeoutMs"> = {
-  /** Idle workers ask for work 4 times a second: quick to react, light on the database. */
-  pollMs: 250,
   /** After an unexpected error, wait a second so a database outage isn't hammered. */
   errorBackoffMs: 1000,
   /** Graceful close waits up to 30s for running steps, like a typical deploy's grace period. */
@@ -65,6 +63,12 @@ export const DEFAULT_ENGINE_SETTINGS: Omit<WorkflowEngineSettings, "timeoutMs"> 
    * second, so a lost step waits at most a second longer, and a scheduled run starts within a second of its minute.
    */
   sweepIntervalMs: 1000,
+  /**
+   * Saved messages reach the broker within a tenth of a second, so that is how
+   * long a ready step waits to be noticed, for one small query on a table that
+   * is nearly always empty.
+   */
+  relayIntervalMs: 100,
   /** A step gets 3 tries in all: enough to ride out a blip, few enough to fail fast on a real bug. */
   maxAttempts: 3,
   /** Retries wait about 1s, then 2s, then 4s…, giving a struggling service time to recover. */

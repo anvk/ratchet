@@ -42,6 +42,14 @@ export interface Events {
   worker_id: string | null;
 }
 
+export interface Outbox {
+  created_at: Generated<Timestamp>;
+  id: Generated<Int8>;
+  publish_at: Generated<Timestamp>;
+  run_id: string | null;
+  type: string;
+}
+
 export interface Schedules {
   created_at: Generated<Timestamp>;
   cron: string | null;
@@ -113,6 +121,7 @@ export interface Workflows {
 
 export interface DB {
   events: Events;
+  outbox: Outbox;
   schedules: Schedules;
   step_runs: StepRuns;
   steps: Steps;

@@ -5,7 +5,12 @@ import { after, before, beforeEach, test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { sql } from "kysely";
 import pg from "pg";
-import { createWorkflowEngine, type ScheduledRun, type WorkflowDefinition } from "../src/index.ts";
+import {
+  createWorkflowEngine,
+  createPollingMessageBroker,
+  type ScheduledRun,
+  type WorkflowDefinition,
+} from "../src/index.ts";
 import { db } from "../src/stores/postgres/index.ts";
 import { testDatabaseUrl } from "./test-env.ts";
 import { scheduled, scheduledExclusive } from "./fixtures/workflows.ts";
@@ -16,6 +21,7 @@ const WORKFLOWS = [scheduled, scheduledExclusive];
 
 /** An engine over the shared store, for creating schedules and running an orchestrator. */
 const engine = createWorkflowEngine({
+  messageBroker: createPollingMessageBroker(),
   workflows: WORKFLOWS,
   store: { ...store, close: async () => {} },
   settings: { timeoutMs: 60_000, sweepIntervalMs: 50 },
@@ -336,6 +342,7 @@ test("a schedule of a workflow the orchestrator doesn't have is left alone", asy
 
 test("the orchestrator starts a due schedule's run", async () => {
   const orchestratorEngine = createWorkflowEngine({
+    messageBroker: createPollingMessageBroker(),
     workflows: [scheduled],
     store: { ...store, close: async () => {} },
     settings: { timeoutMs: 60_000, sweepIntervalMs: 50 },

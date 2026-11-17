@@ -4,6 +4,7 @@
 -- Two kinds of data, like a recipe and cooking that recipe tonight:
 --   the plan:      workflows, steps, schedules
 --   the execution: workflow_runs, step_runs, events
+-- and outbox, which holds messages on their way to the message broker.
 
 CREATE TYPE workflow_run_status AS ENUM ('queued', 'running', 'succeeded', 'failed', 'cancelled');
 
@@ -187,3 +188,19 @@ CREATE TABLE events (
 );
 
 CREATE INDEX events_run_idx ON events (run_id, id);
+
+-- Messages waiting to be published to the message broker. Each is written in
+-- the same transaction as the change it is about, so it exists exactly when
+-- that change committed, and deleted once the orchestrator has published it.
+-- The table holds only what hasn't gone out yet.
+CREATE TABLE outbox (
+  id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  type       text NOT NULL, -- step_ready or run_cancelled
+  -- The run a run_cancelled message is about. Null for step_ready. Not a
+  -- foreign key, so writing a message never locks the run.
+  run_id     uuid,
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  -- The orchestrator leaves the message alone until then. Later than now only
+  -- for a retry, whose message is for the moment its backoff ends.
+  publish_at timestamptz NOT NULL DEFAULT now()
+);

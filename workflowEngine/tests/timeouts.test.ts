@@ -3,7 +3,12 @@ import { startWorkers, stopWorkers, store, waitForFinish } from "./harness.ts";
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
-import { createWorkflowEngine, defineWorkflow, type StepDefinition } from "../src/index.ts";
+import {
+  createWorkflowEngine,
+  createPollingMessageBroker,
+  defineWorkflow,
+  type StepDefinition,
+} from "../src/index.ts";
 import { db } from "../src/stores/postgres/index.ts";
 import { fakeStore } from "./fakeStore.ts";
 import { stalling } from "./fixtures/workflows.ts";
@@ -21,9 +26,10 @@ async function runOnce(step: Omit<StepDefinition, "name">, engineTimeoutMs = 60_
   const wf = defineWorkflow({ name: "timed", version: "1", steps: [{ name: "timed", ...step }] });
   const { store: fake, calls } = fakeStore({ workflow: "timed" });
   const engine = createWorkflowEngine({
+    messageBroker: createPollingMessageBroker({ everyMs: 5 }),
     workflows: [wf],
     store: fake,
-    settings: { timeoutMs: engineTimeoutMs, pollMs: 5 },
+    settings: { timeoutMs: engineTimeoutMs },
   });
   const worker = engine.runWorker();
   return { engine, worker, calls };
@@ -145,7 +151,12 @@ test("a step's own timeout wins over the engine's", async () => {
 test("an engine can't be created without a whole, positive timeoutMs", () => {
   const { store: fake } = fakeStore({ workflow: "timed" });
   const create = (settings: object) =>
-    createWorkflowEngine({ workflows: [], store: fake, settings: settings as never });
+    createWorkflowEngine({
+      messageBroker: createPollingMessageBroker(),
+      workflows: [],
+      store: fake,
+      settings: settings as never,
+    });
   for (const settings of [{}, { timeoutMs: 0 }, { timeoutMs: -1 }, { timeoutMs: 1.5 }]) {
     assert.throws(() => create(settings), /needs a whole, positive timeoutMs setting/);
   }
@@ -214,11 +225,13 @@ test("changing a step's timeoutMs does not create a new version", async () => {
       steps: [{ name: "only", timeoutMs, run: async () => null }],
     });
   await createWorkflowEngine({
+    messageBroker: createPollingMessageBroker(),
     workflows: [withTimeout(1000)],
     store,
     settings: { timeoutMs: 60_000 },
   }).sync();
   await createWorkflowEngine({
+    messageBroker: createPollingMessageBroker(),
     workflows: [withTimeout(2000)],
     store,
     settings: { timeoutMs: 60_000 },

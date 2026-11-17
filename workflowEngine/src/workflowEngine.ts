@@ -1,5 +1,6 @@
 import { DEFAULT_ENGINE_SETTINGS } from "./workflowEngine.constants.ts";
 import type {
+  MessageBroker,
   Registry,
   ScheduledRun,
   WorkflowDefinition,
@@ -85,22 +86,30 @@ function concurrencyFor({
 }
 
 /**
- * Creates an engine from its workflows, storage and settings. Every setting
+ * Creates an engine from its workflows, storage, message broker and settings. Every setting
  * has a default except `timeoutMs`, which must be given. Several engines can
  * run side by side, each only claiming work from its own workflows.
  */
 export function createWorkflowEngine({
   workflows,
   store,
+  messageBroker,
   settings: overrides,
 }: {
   workflows: WorkflowDefinition[];
   store: WorkflowStore;
+  /** Tells workers when to look for work. createPollingMessageBroker needs nothing beside the store. */
+  messageBroker: MessageBroker;
   settings: Partial<WorkflowEngineSettings> & Pick<WorkflowEngineSettings, "timeoutMs">;
 }): WorkflowEngine {
   // The type already requires it; this is for callers that aren't type-checked.
   if (!(Number.isInteger(overrides.timeoutMs) && overrides.timeoutMs > 0)) {
     throw new Error("An engine needs a whole, positive timeoutMs setting");
+  }
+  if (!messageBroker) {
+    throw new Error(
+      "An engine needs a messageBroker; createPollingMessageBroker() needs nothing else",
+    );
   }
   assertUnique(
     workflows.map((w) => w.name),
@@ -110,7 +119,7 @@ export function createWorkflowEngine({
   const settings = { ...DEFAULT_ENGINE_SETTINGS, ...overrides };
   const stop = new AbortController();
   const loops = new Set<Promise<void>>();
-  let storeClosed: Promise<void> | undefined;
+  let closed: Promise<void> | undefined;
 
   /** Tracks a running worker or orchestrator, so close can wait for it to stop. */
   async function track(loop: Promise<void>) {
@@ -214,11 +223,14 @@ export function createWorkflowEngine({
     redriveRun: (runId) => store.redriveRun({ runId }),
     cancelRun: (runId) => store.cancelRun({ runId }),
     runWorker: ({ workerId } = {}) =>
-      track(runWorker({ registry, store, settings, stopSignal: stop.signal, workerId })),
+      track(
+        runWorker({ registry, store, messageBroker, settings, stopSignal: stop.signal, workerId }),
+      ),
     runOrchestrator: () =>
       track(
         runOrchestrator({
           store,
+          messageBroker,
           settings,
           stopSignal: stop.signal,
           workflows,
@@ -228,8 +240,8 @@ export function createWorkflowEngine({
     async close({ force = false } = {}) {
       stop.abort();
       if (!force) await waitForLoops();
-      storeClosed ??= store.close();
-      await storeClosed;
+      closed ??= Promise.all([store.close(), messageBroker.close()]).then(() => {});
+      await closed;
     },
   };
 }

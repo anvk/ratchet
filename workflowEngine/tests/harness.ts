@@ -7,7 +7,11 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { sql } from "kysely";
 import pg from "pg";
-import { createWorkflowEngine, FINISHED_RUN_STATUSES } from "../src/index.ts";
+import {
+  createWorkflowEngine,
+  createPollingMessageBroker,
+  FINISHED_RUN_STATUSES,
+} from "../src/index.ts";
 import { createPostgresStore, db } from "../src/stores/postgres/index.ts";
 import { scheduledWorkflows, workflows } from "./fixtures/workflows.ts";
 
@@ -37,6 +41,7 @@ async function resetDatabase() {
 export async function startWorkers(count: number) {
   await resetDatabase();
   await createWorkflowEngine({
+    messageBroker: createPollingMessageBroker(),
     workflows: [...workflows, ...scheduledWorkflows],
     store,
     settings: { timeoutMs: 60_000 },
