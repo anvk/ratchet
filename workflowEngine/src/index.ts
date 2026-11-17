@@ -10,7 +10,9 @@ export {
 export type {
   Claim,
   ClaimOrder,
+  EngineMessage,
   FinalFailure,
+  MessageBroker,
   Registry,
   ScheduledRun,
   StepDefaults,
@@ -29,3 +31,4 @@ export {
   UnknownWorkflowError,
 } from "./workflowEngine.errors.ts";
 export { canRedrive } from "./workflowEngine.utils.ts";
+export { createPollingMessageBroker } from "./messageBrokers/polling/polling.messageBroker.ts";

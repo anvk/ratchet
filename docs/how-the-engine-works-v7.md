@@ -128,8 +128,10 @@ A worker (`workflowEngine.worker.ts`) is a loop that runs forever:
 loop:
   claim a ready step from the database (it comes with a lease)
   if there was one → run it, renewing the lease every so often, save the result
-  if not           → sleep 250ms (pollMs), try again
+  if not           → wait to be told a step is ready, then try again
 ```
+
+Who tells it is the **message broker** (section 19). The simplest one is a timer that says "look again" every 250ms, which is called **polling**. The demo uses one that speaks up only when there is something to find.
 
 `pnpm dev` starts **3 workers**, each a separate process, plus **1 orchestrator** (section 8). They never talk to each other. The database is the only thing they share.
 
@@ -177,7 +179,7 @@ A lease works the same way for a step:
 
 ## 8. The orchestrator: when a worker goes silent
 
-The orchestrator (`workflows/orchestrator.ts`) is a separate process running a loop. It has two jobs: this section's, and starting scheduled runs (section 15). Workers do neither, so an orchestrator has to be running: without one, a step whose worker went silent stays `running`, and no schedule fires. Every second (`sweepIntervalMs`) it **sweeps**: it looks for `running` steps whose lease has expired, makes each one **`ready`** again, clears its worker, and writes a `step_lease_expired` event. The next worker that asks claims it as **attempt 2**.
+The orchestrator (`workflows/orchestrator.ts`) is a separate process running a loop. It has three jobs: this section's, starting scheduled runs (section 15), and relaying messages to workers (section 19). Workers do neither, so an orchestrator has to be running: without one, a step whose worker went silent stays `running`, and no schedule fires. Every second (`sweepIntervalMs`) it **sweeps**: it looks for `running` steps whose lease has expired, makes each one **`ready`** again, clears its worker, and writes a `step_lease_expired` event. The next worker that asks claims it as **attempt 2**.
 
 **A worker crashes:**
 
@@ -437,7 +439,7 @@ Steps have no `cancelled` status. A step that was running when its run was cance
 
 A cancelled run can be resumed like a failed one: **Resume run** puts back the steps that didn't succeed, cut off or skipped, and the run carries on from there.
 
-**How does the worker find out?** Nothing is sent to it. The cancelled step is no longer `running`, so the worker's next heartbeat finds nothing to renew (section 7). That is exactly what a lost lease looks like: `ctx.signal` fires, and if the step finishes anyway, its result matches nothing and is rejected (section 8). The run is over the moment you cancel; the worker hears within a third of the step's lease.
+**How does the worker find out?** The cancelled step is no longer `running`, so the worker's next heartbeat finds nothing to renew (section 7). That is exactly what a lost lease looks like: `ctx.signal` fires, and if the step finishes anyway, its result matches nothing and is rejected (section 8). The run is over the moment you cancel. Left to its heartbeats, the worker hears within a third of the step's lease; a `run_cancelled` message makes it send one straight away (section 19).
 
 **Cancelling has a deadlock to avoid.** Everything that changes a run's steps locks the run first (section 10), and so does a cancel. But a cancel is the first thing that locks a run **before it has started**, and a run's first claim takes its locks the other way round, the step and then the run:
 
@@ -605,31 +607,66 @@ interface WorkflowStore {
   redriveRun(...)     cancelRun(...)
   createSchedule(...) updateSchedule(...) deleteSchedule(...)
   setSchedulePaused(...)                  fireDueSchedules(...)
-  close()
+  relayMessages(...)  close()
 }
 ```
 
-`createPostgresStore()` is one implementation of it. You could write a file-based or SQLite store with the same fifteen methods, and the engine and workers wouldn't change.
+`createPostgresStore()` is one implementation of it. You could write a file-based or SQLite store with the same sixteen methods, and the engine and workers wouldn't change.
 
 `failStep` decides between a retry and a final failure in one transaction, using the step's retry policy from the plan. The run lock (section 10) and the group lock (section 13) are the store's business too: the interface only promises that two steps finishing at once ready a step that needs both exactly once, and that a group never has more than its limit in progress, and each store keeps those promises its own way. Leases are part of the same interface on purpose: the ownership check has to happen in the same transaction that saves a step's result, so leases must live wherever step state lives.
 
 ---
 
-## 19. The whole picture
+## 19. Messages: telling workers instead of waiting for them to ask
+
+An idle worker waits to be told there's work (section 5). The simplest way to tell it is a timer, and that has a price. Tick often, and every idle worker queries the database several times a second whether or not there's work. Tick rarely, and a ready step waits. Either way, a worker running a cancelled step only notices at its next heartbeat (section 14). A message fixes all three: something tells the workers.
+
+**A message is a hint, never the truth.** There are two: `step_ready` ("some step may be claimable") and `run_cancelled` ("this run was cancelled"). A worker that gets `step_ready` stops waiting and runs the same claim query as always (section 6). A worker running a step of a cancelled run sends a heartbeat at once, and the store's answer decides whether its step is stopped. So a message that arrives twice or late costs a query and nothing else, because the database still decides.
+
+**Three pieces carry it,** each with one job:
 
 ```
- Dashboard ──HTTP──▶ API ──startRun──▶ ┌────────────────── Postgres ─────────────────┐
-    ▲                 │                │ schedules  workflow_runs  step_runs  events │
-    └─────reads───────┘                └─────────────────────────────────────────────┘
+store ──(same transaction)──▶ outbox ──(orchestrator's relay)──▶ message broker ──▶ workers
+```
+
+1. **The store writes the message to the `outbox` table** in the same transaction as the change it's about: a `step_ready` whenever a step becomes claimable, a `run_cancelled` when a run with a running step is cancelled. The message exists exactly when the change committed. Sending it straight to the broker instead would leave a gap: a process that died between the commit and the send would lose the message.
+2. **The orchestrator relays.** Every 100ms (`relayIntervalMs`) it takes the waiting rows, publishes them to the broker and deletes them, in one transaction. If the publish fails, nothing is deleted and the next round tries again. If the delete fails after a publish, the message goes out twice. That is **at least once**, the same promise steps get (section 8).
+3. **Workers subscribe** to the broker. They never publish.
+
+**The broker is an interface,** like the store (section 18): `publish`, `subscribe`, `close`. There are two:
+
+- **`createPostgresMessageBroker()`** uses Postgres's own `LISTEN` and `NOTIFY`: each worker keeps one connection listening, and Postgres hands every published message to all of them, in whichever process or pod they run.
+- **`createPollingMessageBroker()`** is the timer. It carries nothing between processes; it tells its own workers `step_ready` every 250ms. It needs no orchestrator, and nothing can go missing.
+
+Another broker can take their place without the store, the relay or the workers changing.
+
+**A worker has no timer of its own,** so a broker must never leave it waiting on a message it failed to deliver. Postgres keeps no notification for a connection that isn't there, so when the Postgres broker loses its connection, it reconnects and tells its workers `step_ready` itself: it can't know what it missed. Every broker has to do the same after any gap. The Postgres broker adds a slow timer of its own on top, telling its workers to look every 30 seconds whatever it has heard, so a message missed in a way nobody thought of makes a step late, not stuck.
+
+**A backlog drains in a few messages.** If no orchestrator ran for an hour, thousands of `step_ready` rows may be waiting, and they all say the same thing. The relay publishes what a batch means, not each row: one `step_ready` however many there are, and one `run_cancelled` per run.
+
+**A retry's message waits for its backoff.** A step that will retry is claimable when its backoff ends (section 11), not when the failure commits. Its `step_ready` is written with the failure, marked "not before" that moment, and the relay leaves it until then. So the orchestrator sends every message, for new work and for retries alike.
+
+**What a sticky worker keeps to itself.** A worker that finishes a step and takes the run's next one in the same transaction (section 16) leaves nothing for anyone else, so no message is written.
+
+---
+
+## 20. The whole picture
+
+```
+ Dashboard ──HTTP──▶ API ──startRun──▶ ┌────────────────────── Postgres ─────────────────────┐
+    ▲                 │                │ schedules  workflow_runs  step_runs  events  outbox │
+    └─────reads───────┘                └─────────────────────────────────────────────────────┘
                                           ▲  claim / heartbeat /     ▲ sweep expired leases,
-                                          │  complete / fail         │ start scheduled runs
-                               ┌──────────┼──────────┐               │
+                                          │  complete / fail         │ start scheduled runs,
+                               ┌──────────┼──────────┐               │ relay the outbox
                            worker-1   worker-2   worker-3      orchestrator
+                               ▲          ▲          ▲               │
+                               └──────────┴── message broker ◀───────┘
 ```
 
 1. The **API** starts runs (through the engine, which admits them or makes them wait) and reads tables for the dashboard.
 2. **Workers** claim ready steps of versions they have, run your functions while sending heartbeats, save the results, and ready the steps that were waiting on them.
-3. The **orchestrator** gives steps whose worker went silent to another worker, and starts a run each time a schedule is due.
+3. The **orchestrator** gives steps whose worker went silent to another worker, starts a run each time a schedule is due, and relays the messages that tell workers there is work.
 4. **Postgres** holds everything, so any process can die and restart without losing progress.
 
 ---
@@ -639,6 +676,7 @@ interface WorkflowStore {
 - **A retry repeats whatever the failed attempt already did,** unless the step makes it safe to repeat (section 12). The engine can't do that for you.
 - **The engine can't tell when a step's code changes.** If you edit the code inside `run` and leave the workflow's `version` as it was, old and new workers both claim the same runs.
 - **A timed-out step isn't stopped.** The worker stops waiting for it, but unless the step honours `ctx.signal` its function keeps running in the background, and may overlap with its own retry.
-- **A cancelled step isn't stopped either.** Its worker hears at its next heartbeat, up to a third of the lease later, and the step's function only stops if it honours `ctx.signal`.
+- **A cancelled step isn't stopped either.** Its worker hears within moments when a message reaches it, and otherwise at its next heartbeat, but the step's function only stops if it honours `ctx.signal`.
+- **Every idle worker wakes for one ready step.** A `step_ready` message goes to all of them, one wins the claim, and the rest find nothing.
 
-All four are listed in `workflowEngine/guarantees.md`.
+All five are listed in `workflowEngine/guarantees.md`.

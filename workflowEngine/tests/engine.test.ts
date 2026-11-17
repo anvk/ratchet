@@ -5,6 +5,7 @@ import { after, before, test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   createWorkflowEngine,
+  createPollingMessageBroker,
   DEFAULT_ENGINE_SETTINGS,
   defineWorkflow,
   UnknownWorkflowError,
@@ -129,6 +130,7 @@ test("an engine rejects two workflows with the same name", () => {
   assert.throws(
     () =>
       createWorkflowEngine({
+        messageBroker: createPollingMessageBroker(),
         workflows: [pipeline, pipeline],
         store,
         settings: { timeoutMs: 60_000 },
@@ -222,7 +224,12 @@ test("editing a workflow leaves earlier runs on the version they started with", 
 });
 
 test("engine.startRun starts a run by workflow name, and rejects a name it doesn't have", async () => {
-  const engine = createWorkflowEngine({ workflows, store, settings: { timeoutMs: 60_000 } });
+  const engine = createWorkflowEngine({
+    messageBroker: createPollingMessageBroker(),
+    workflows,
+    store,
+    settings: { timeoutMs: 60_000 },
+  });
   const runId = await engine.startRun({ workflow: "pipeline", input: {} });
   await waitForFinish([runId]);
   const run = await db

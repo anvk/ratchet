@@ -123,6 +123,36 @@ only claim and run steps.
   caller already used returns the existing run.
 - **Each step has a stable key.** `ctx.idempotencyKey` is the same on every
   attempt of a step.
+- **A message is saved with the change it is about.** Making a step claimable
+  saves a `step_ready` message, and cancelling a run with a running step saves
+  a `run_cancelled` one, in the same transaction as the change. A step that
+  will retry gets its message with the failure, held back until its backoff is
+  over, so the orchestrator sends the message for new work and for retries. A change that
+  doesn't commit leaves no message, and one that commits always leaves its
+  message.
+- **A saved message stays until it has been published.** The orchestrator
+  relays the outbox to the message broker and deletes a message only in the
+  transaction that published it, so a broker that is down delays messages
+  without losing them. Delivery is **at least once**: a message can be
+  published twice. Two orchestrators never relay the same message at once.
+- **A backlog is relayed as a few messages.** Any number of waiting
+  `step_ready` messages are published as one, and several `run_cancelled` for
+  one run as one.
+- **A message is only ever a hint.** A worker that gets `step_ready` claims
+  through the store as always, and one that gets `run_cancelled` asks the store
+  whether it still owns its step. A repeated or stale message can't start or
+  stop anything by itself.
+- **A worker with nothing to do waits for a `step_ready` message, and claims
+  as soon as one arrives.** It has no timer of its own; how often it looks is
+  up to the message broker.
+- **The Postgres message broker tells its workers to look for work after its
+  connection was lost,** since it can't know what it missed. So a worker never
+  waits on a message that was published while it couldn't listen.
+- **The Postgres message broker also tells its workers to look every
+  `everyMs`,** 30 seconds by default, whatever it has heard. A message missed
+  in a way nobody foresaw makes a step late by that long at most, not stuck.
+- **The polling message broker needs no orchestrator and no messages.** It
+  tells its workers to look every `everyMs`, whatever is or isn't published.
 - **History matches state.** Every state change and its event commit in the
   same transaction.
 - **Workers pick steps by the engine's claim order.**
@@ -141,9 +171,19 @@ only claim and run steps.
   unique key or `ctx.idempotencyKey`.
 - **A timed-out step's function isn't stopped.** Unless it honours `ctx.signal`
   it keeps running in the background, and may overlap with its own retry.
-- **A running step hears about a cancel at its next heartbeat,** up to a third
-  of its lease later, and its function isn't stopped. Unless it honours
+- **A cancelled step's function isn't stopped.** Its worker hears within
+  moments when a `run_cancelled` message reaches it, and otherwise at its next
+  heartbeat, up to a third of its lease later. Unless the function honours
   `ctx.signal` it keeps running until it returns, and its result is discarded.
+- **With the Postgres message broker, work is slow while no orchestrator is
+  running.** Only the orchestrator tells workers when there is work, so without
+  one they look just once every `everyMs`. When one returns it sends what is
+  waiting, and work carries on at full speed.
+- **Every idle worker wakes for one ready step.** A `step_ready` message goes
+  to all subscribers; one wins the claim and the rest find nothing.
+- **The Postgres message broker needs a direct connection to listen on.** A
+  pooler that hands out connections per transaction can't deliver
+  notifications.
 - **A failed run ends only when its last running step does,** since steps
   that don't depend on the failure finish first.
 - **The engine can't tell when a step's code changes.** A workflow gets a new

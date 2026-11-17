@@ -2,7 +2,7 @@ import { startWorkers, stopWorkers, store, waitForFinish } from "./harness.ts";
 
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
-import { createWorkflowEngine, type ClaimOrder } from "../src/index.ts";
+import { createWorkflowEngine, createPollingMessageBroker, type ClaimOrder } from "../src/index.ts";
 import { db } from "../src/stores/postgres/index.ts";
 import { pipeline, workflows } from "./fixtures/workflows.ts";
 
@@ -30,9 +30,10 @@ async function claimsWith({
 
   // The shared store stays open for the next test, so closing the engine mustn't close it.
   const engine = createWorkflowEngine({
+    messageBroker: createPollingMessageBroker({ everyMs: 5 }),
     workflows,
     store: { ...store, close: async () => {} },
-    settings: { timeoutMs: 60_000, pollMs: 5, claimOrder: order },
+    settings: { timeoutMs: 60_000, claimOrder: order },
   });
   for (let i = 1; i <= workerCount; i++) void engine.runWorker({ workerId: `worker-${i}` });
   await waitForFinish(runIds);

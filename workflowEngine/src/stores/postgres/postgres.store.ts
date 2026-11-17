@@ -14,6 +14,7 @@ import type { FailureReason } from "../../workflowEngine.constants.ts";
 import type {
   Claim,
   ClaimOrder,
+  EngineMessage,
   EventFields,
   FinalFailure,
   ScheduledRun,
@@ -42,6 +43,32 @@ async function emit({
       attempt: attempt ?? null,
       worker_id: workerId ?? null,
       detail: detail === undefined ? null : JSON.stringify(detail),
+    })
+    .execute();
+}
+
+/**
+ * Saves a message for the orchestrator to publish, in the caller's transaction,
+ * so it exists exactly when the change it is about has committed. With
+ * `afterMs`, the orchestrator holds it back that long: a retry's message is for
+ * the moment its backoff ends, not for now.
+ */
+async function enqueue({
+  trx,
+  message,
+  afterMs = 0,
+}: {
+  trx: Tx;
+  message: EngineMessage;
+  afterMs?: number;
+}) {
+  await trx
+    .insertInto("outbox")
+    .values({
+      type: message.type,
+      run_id: message.type === "run_cancelled" ? message.runId : null,
+      // The same expression as the step's ready_at, so they are the same moment.
+      publish_at: sql<Date>`now() + (${afterMs}::int * interval '1 millisecond')`,
     })
     .execute();
 }
@@ -169,7 +196,8 @@ async function admitWaitingRuns({ trx, key }: { trx: Tx; key: string }) {
       .where("id", "=", next.id)
       .execute();
     await emit({ trx, runId: next.id, type: "run_admitted" });
-    await readyUnblockedSteps({ trx, runId: next.id });
+    const ready = await readyUnblockedSteps({ trx, runId: next.id });
+    if (ready.length > 0) await enqueue({ trx, message: { type: "step_ready" } });
   }
 }
 
@@ -302,6 +330,7 @@ async function insertRun({
   for (const step of steps.filter(ready)) {
     await emit({ trx, runId: run.id, type: "step_ready", stepName: step.name });
   }
+  if (steps.some(ready)) await enqueue({ trx, message: { type: "step_ready" } });
 
   if (concurrency) {
     await admitWaitingRuns({ trx, key: concurrency.key });
@@ -516,7 +545,9 @@ async function lockRun({ trx, runId }: { trx: Tx; runId: string }) {
 /**
  * Readies every pending step of a run whose needs have all succeeded, and
  * returns them in order. With `finishedStep`, only steps that need that step,
- * since nothing else can have changed. Call it with the run locked.
+ * since nothing else can have changed. Call it with the run locked. Saving the
+ * `step_ready` message is left to the caller, which knows whether any of them
+ * is left for another worker.
  */
 async function readyUnblockedSteps({
   trx,
@@ -546,7 +577,8 @@ async function readyUnblockedSteps({
     );
   if (finishedStep) query = query.where(sql<boolean>`${finishedStep} = ANY(sr.needs)`);
   const ready = await query.returning(["sr.id", "sr.name", "sr.position"]).execute();
-  for (const step of ready.sort((a, b) => a.position - b.position)) {
+  ready.sort((a, b) => a.position - b.position);
+  for (const step of ready) {
     await emit({ trx, runId, type: "step_ready", stepName: step.name });
   }
   return ready;
@@ -590,6 +622,10 @@ async function completeStep({
       finishedStep: claim.stepName,
     });
     if (ready.length > 0) {
+      // The step this worker takes for itself needs no message; the rest do.
+      if (ready.length > (claimNext ? 1 : 0)) {
+        await enqueue({ trx, message: { type: "step_ready" } });
+      }
       if (!claimNext) return { completed: true, next: null };
       // Still inside this transaction, so no other worker ever sees it ready.
       // Any others stay ready for other workers.
@@ -808,6 +844,8 @@ async function failStep({
         workerId: claim.workerId,
         detail: { error, retryInMs },
       });
+      // Held back until the backoff is over, when the step can be claimed.
+      await enqueue({ trx, message: { type: "step_ready" }, afterMs: retryInMs });
       return { recorded: true, retryInMs, failureReason: null };
     }
 
@@ -930,6 +968,7 @@ async function sweepExpiredLeases({ defaults }: { defaults: StepDefaults }): Pro
         .where("id", "=", step.id)
         .execute();
       await emit({ trx, runId: step.run_id, type: "step_ready", stepName: step.name });
+      await enqueue({ trx, message: { type: "step_ready" } });
       return true;
     });
     if (handled) swept++;
@@ -979,7 +1018,8 @@ async function redriveRun({ runId }: { runId: string }): Promise<boolean> {
         .where("id", "=", runId)
         .execute();
       await emit({ trx, runId, type: "run_redriven" });
-      await readyUnblockedSteps({ trx, runId });
+      const ready = await readyUnblockedSteps({ trx, runId });
+      if (ready.length > 0) await enqueue({ trx, message: { type: "step_ready" } });
       return true;
     }
 
@@ -1068,6 +1108,10 @@ async function cancelRun({ runId }: { runId: string }): Promise<boolean> {
       .where("id", "=", runId)
       .execute();
     await emit({ trx, runId, type: "run_cancelled" });
+    // Only a worker running one of its steps has anything to do about it.
+    if (steps.some((step) => step.status === "failed")) {
+      await enqueue({ trx, message: { type: "run_cancelled", runId } });
+    }
 
     await giveUpSlot({ trx, key: run.concurrency_key });
     return true;
@@ -1384,6 +1428,68 @@ async function fireDueSchedules({
   return started;
 }
 
+/** The most saved messages one relay transaction takes. */
+const RELAY_BATCH = 1000;
+
+/**
+ * Hands the saved messages whose time has come to `publish` and deletes them,
+ * a batch at a time until none are left, and returns how many it deleted.
+ *
+ * Each batch is one transaction: lock the oldest rows, publish, delete. If
+ * publish throws, the transaction rolls back and the rows stay for the next
+ * call, so a message is never lost. If the delete fails after a publish went
+ * out, the message is published again: at least once, not exactly once.
+ *
+ * A batch is published as what it means, not row by row: any number of
+ * step_ready rows are one message, and so are several run_cancelled rows for
+ * one run. So an orchestrator that comes back to thousands of rows sends a few
+ * messages, not thousands.
+ *
+ * The lock is FOR UPDATE SKIP LOCKED, like claimStep's, so two orchestrators
+ * never relay the same row at once: the second takes the rows after it, or
+ * finds none. Nothing else locks these rows.
+ */
+async function relayMessages({
+  publish,
+}: {
+  publish: (message: EngineMessage) => Promise<void>;
+}): Promise<number> {
+  let relayed = 0;
+  for (;;) {
+    const taken = await db.transaction().execute(async (trx) => {
+      const rows = await trx
+        .selectFrom("outbox")
+        .select(["id", "type", "run_id"])
+        // A retry's message waits here until its backoff is over.
+        .where("publish_at", "<=", sql<Date>`now()`)
+        .orderBy("id")
+        .limit(RELAY_BATCH)
+        .forUpdate()
+        .skipLocked()
+        .execute();
+      if (rows.length === 0) return 0;
+
+      const cancelledRuns = new Set(
+        rows.filter((row) => row.type === "run_cancelled").map((row) => row.run_id!),
+      );
+      for (const runId of cancelledRuns) await publish({ type: "run_cancelled", runId });
+      if (rows.some((row) => row.type === "step_ready")) await publish({ type: "step_ready" });
+
+      await trx
+        .deleteFrom("outbox")
+        .where(
+          "id",
+          "in",
+          rows.map((row) => row.id),
+        )
+        .execute();
+      return rows.length;
+    });
+    relayed += taken;
+    if (taken < RELAY_BATCH) return relayed;
+  }
+}
+
 export function createPostgresStore(): WorkflowStore {
   return {
     syncWorkflows,
@@ -1400,6 +1506,7 @@ export function createPostgresStore(): WorkflowStore {
     deleteSchedule,
     setSchedulePaused,
     fireDueSchedules,
+    relayMessages,
     close: () => db.destroy(),
   };
 }

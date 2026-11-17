@@ -2,13 +2,14 @@ import { startWorkers, stopWorkers, store, waitForFinish } from "./harness.ts";
 
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
-import { createWorkflowEngine } from "../src/index.ts";
+import { createPollingMessageBroker, createWorkflowEngine } from "../src/index.ts";
 import { db } from "../src/stores/postgres/index.ts";
 import { doomed, flaky, workflows } from "./fixtures/workflows.ts";
 
 // Real worker processes run the steps. An orchestrator runs here for the test
 // about lost leases, sharing the store, which must stay open.
 const orchestrator = createWorkflowEngine({
+  messageBroker: createPollingMessageBroker(),
   workflows,
   store: { ...store, close: async () => {} },
   settings: { timeoutMs: 60_000, sweepIntervalMs: 50 },

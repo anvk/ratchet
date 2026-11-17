@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   createWorkflowEngine,
+  createPollingMessageBroker,
   defineWorkflow,
   type WorkflowEngine,
   type WorkflowEngineSettings,
@@ -35,9 +36,10 @@ async function engineWithRunningStep(settings?: Partial<WorkflowEngineSettings>)
   });
 
   const engine: WorkflowEngine = createWorkflowEngine({
+    messageBroker: createPollingMessageBroker({ everyMs: 1 }),
     workflows: [slow],
     store,
-    settings: { timeoutMs: 60_000, pollMs: 1, ...settings },
+    settings: { timeoutMs: 60_000, ...settings },
   });
   const worker = engine.runWorker({ workerId: "worker" });
   await stepStarted;

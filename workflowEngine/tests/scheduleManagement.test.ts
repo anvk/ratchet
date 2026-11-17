@@ -4,7 +4,11 @@ import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { sql } from "kysely";
-import { createWorkflowEngine, UnknownWorkflowError } from "../src/index.ts";
+import {
+  createWorkflowEngine,
+  createPollingMessageBroker,
+  UnknownWorkflowError,
+} from "../src/index.ts";
 import { db } from "../src/stores/postgres/index.ts";
 import { nextFireAfter } from "../src/workflowEngine.cron.ts";
 import { scheduled, scheduledExclusive } from "./fixtures/workflows.ts";
@@ -17,6 +21,7 @@ const WORKFLOWS = [scheduled, scheduledExclusive];
 /** An engine over the shared store, which every schedule is created and changed through. */
 function newEngine() {
   return createWorkflowEngine({
+    messageBroker: createPollingMessageBroker(),
     workflows: WORKFLOWS,
     store: { ...store, close: async () => {} },
     settings: { timeoutMs: 60_000, sweepIntervalMs: 50 },

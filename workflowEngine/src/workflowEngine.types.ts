@@ -158,11 +158,51 @@ export interface ScheduledRun {
 }
 
 /**
+ * What the message broker tells workers. A message is a hint, never the truth:
+ * a worker acts on one by asking the store, which decides. So a message may
+ * arrive more than once, or with nothing behind it, and do no harm.
+ *
+ * - `step_ready`: some step may be claimable now. It doesn't say which. This is
+ *   the only thing that makes an idle worker look for work.
+ * - `run_cancelled`: this run was cancelled, so a worker running one of its
+ *   steps should check whether it still owns it.
+ */
+export type EngineMessage = { type: "step_ready" } | { type: "run_cancelled"; runId: string };
+
+/**
+ * Carries messages from the orchestrator to the workers, across processes. The
+ * engine only talks to this interface, so Postgres LISTEN/NOTIFY, a broker such
+ * as RabbitMQ or NATS, or a plain timer can sit behind it.
+ *
+ * Only the orchestrator publishes, from the store's outbox (see
+ * WorkflowStore.relayMessages), and only workers subscribe.
+ *
+ * An idle worker does nothing until it is told `step_ready`, so an
+ * implementation must never leave its subscribers waiting on a message it
+ * failed to deliver: after any interruption in which it could have missed
+ * one, such as a lost connection, it must tell them `step_ready` itself.
+ */
+export interface MessageBroker {
+  /**
+   * Sends a message to every subscriber, in this process and in others. Throws
+   * if it couldn't be sent, so that the message stays in the outbox.
+   */
+  publish(message: EngineMessage): Promise<void>;
+  /** Calls the listener for each message published from now on, until close. */
+  subscribe(listener: (message: EngineMessage) => void): Promise<void>;
+  /** Releases connections. */
+  close(): Promise<void>;
+}
+
+/**
  * Where workflow state lives. The engine only talks to this interface, so a
  * file or another database can replace Postgres by implementing it.
  *
- * Every method must be atomic: a state change and its events are saved
- * together or not at all.
+ * Every method must be atomic: a state change, its events and its messages
+ * are saved together or not at all. A method that makes a step claimable
+ * saves a `step_ready` message, and cancelRun saves a `run_cancelled` one, for
+ * relayMessages to hand over later. A step that will retry is claimable when
+ * its backoff ends, so its message is held back until then.
  */
 export interface WorkflowStore {
   /**
@@ -313,6 +353,17 @@ export interface WorkflowStore {
     workflows: WorkflowDefinition[];
     scheduledRunFor: (schedule: { workflow: string; name: string; input: unknown }) => ScheduledRun;
   }): Promise<number>;
+  /**
+   * Hands the saved messages whose time has come to `publish` and removes the
+   * ones it took, however many are waiting. A retry's message is left until its
+   * backoff is over. Repeats are sent once: any number of waiting
+   * `step_ready` messages become one, and so do several `run_cancelled` for one
+   * run, so a long backlog costs a few publishes. If `publish` throws, the
+   * messages it was given stay saved for the next call. A message can be
+   * published more than once, never lost. Safe to run from several processes at
+   * once. Returns how many saved messages it removed.
+   */
+  relayMessages(request: { publish: (message: EngineMessage) => Promise<void> }): Promise<number>;
   /** Releases connections or file handles. */
   close(): Promise<void>;
 }
@@ -337,8 +388,6 @@ export interface StepDefaults {
 
 /** How an engine instance behaves. */
 export interface WorkflowEngineSettings {
-  /** How long an idle worker waits before asking for work again. */
-  pollMs: number;
   /** How long a worker waits after an unexpected error, such as a lost connection. */
   errorBackoffMs: number;
   /** How long close waits for running steps before force closing. */
@@ -358,6 +407,12 @@ export interface WorkflowEngineSettings {
    * starting due scheduled runs.
    */
   sweepIntervalMs: number;
+  /**
+   * How often the orchestrator relays saved messages to the message broker.
+   * Much shorter than its rounds: this is how long a ready step waits before
+   * workers are told about it.
+   */
+  relayIntervalMs: number;
   /** How many times a step may run, for steps that don't set their own. See StepDefinition.maxAttempts. */
   maxAttempts: number;
   /** The first retry's wait, for steps that don't set their own. See StepDefinition.backoffMs. */
@@ -395,13 +450,20 @@ export interface WorkflowEngine {
   redriveRun(runId: string): Promise<boolean>;
   /** Stops a run that hasn't finished. See WorkflowStore.cancelRun. */
   cancelRun(runId: string): Promise<boolean>;
-  /** Runs a worker until the engine is closed. */
+  /**
+   * Runs a worker until the engine is closed. It subscribes to the message
+   * broker: it claims steps until there are none, then waits for a
+   * `step_ready` message, and a `run_cancelled` one makes it check the step it
+   * is running.
+   */
   runWorker(options?: { workerId?: string }): Promise<void>;
   /**
    * Runs the orchestrator until the engine is closed. It looks after runs as a
    * whole, and every sweepIntervalMs does two jobs: it makes steps whose worker
    * stopped sending heartbeats ready again, and it starts a run for each
-   * schedule of this engine's workflows that is due and not paused.
+   * schedule of this engine's workflows that is due and not paused. Every
+   * relayIntervalMs it also relays the store's saved messages to the message
+   * broker.
    */
   runOrchestrator(): Promise<void>;
   /**
@@ -463,7 +525,8 @@ export interface WorkflowEngine {
   };
   /**
    * Stops workers from claiming more steps, waits for the steps they are running
-   * for up to closeTimeoutMs, then closes the store. Safe to call more than once.
+   * for up to closeTimeoutMs, then closes the store and the message broker. Safe
+   * to call more than once.
    *
    * With force, closes without waiting. A step still running when the store closes
    * can't be interrupted, so its result is lost; once its lease expires, the

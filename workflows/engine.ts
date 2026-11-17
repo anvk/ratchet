@@ -1,4 +1,5 @@
 import { createWorkflowEngine } from "@ratchet/engine";
+import { createPostgresMessageBroker } from "@ratchet/engine/messageBrokers/postgres";
 import { createPostgresStore } from "@ratchet/engine/postgres";
 import { workflows } from "./index.ts";
 
@@ -6,8 +7,10 @@ import { workflows } from "./index.ts";
 export const engine = createWorkflowEngine({
   workflows,
   store: createPostgresStore(),
+  // Tells workers when a step is ready. createPollingMessageBroker() would have
+  // them ask on a timer instead, with nothing but the store.
+  messageBroker: createPostgresMessageBroker(),
   settings: {
-    pollMs: 250,
     errorBackoffMs: 1000,
     closeTimeoutMs: 30_000,
     // "sticky" | "fair" | "oldest-run-first". Restart workers after changing it.

@@ -3,7 +3,12 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createWorkflowEngine, defineWorkflow, UnknownWorkflowError } from "../src/index.ts";
+import {
+  createWorkflowEngine,
+  createPollingMessageBroker,
+  defineWorkflow,
+  UnknownWorkflowError,
+} from "../src/index.ts";
 import { fakeStore } from "./fakeStore.ts";
 
 const report = defineWorkflow({
@@ -16,7 +21,12 @@ const report = defineWorkflow({
 function engineWithFakeStore() {
   const { store, calls } = fakeStore({ workflow: "report" });
   return {
-    engine: createWorkflowEngine({ workflows: [report], store, settings: { timeoutMs: 60_000 } }),
+    engine: createWorkflowEngine({
+      messageBroker: createPollingMessageBroker(),
+      workflows: [report],
+      store,
+      settings: { timeoutMs: 60_000 },
+    }),
     calls,
   };
 }
