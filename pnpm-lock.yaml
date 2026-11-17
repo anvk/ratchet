@@ -185,11 +185,11 @@ importers:
         specifier: ^7.0.2
         version: 7.0.2
 
-  api:
+  demo/api:
     dependencies:
       '@ratchet/engine':
         specifier: workspace:*
-        version: link:../workflowEngine
+        version: link:../../workflowEngine
       fastify:
         specifier: ^5.0.0
         version: 5.12.8
@@ -204,14 +204,14 @@ importers:
         specifier: ^22.0.0
         version: 22.20.5
 
-  client:
+  demo/client:
     dependencies:
       '@ratchet/api':
         specifier: workspace:*
         version: link:../api
       '@ratchet/engine':
         specifier: workspace:*
-        version: link:../workflowEngine
+        version: link:../../workflowEngine
       '@tanstack/react-query':
         specifier: ^5.59.0
         version: 5.107.1(@types/react@19.3.0)(react@19.3.1)
@@ -256,6 +256,25 @@ importers:
         specifier: ^8.3.7
         version: 8.3.7(@types/node@22.20.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)
 
+  demo/workflows:
+    dependencies:
+      '@ratchet/api':
+        specifier: workspace:*
+        version: link:../api
+      '@ratchet/engine':
+        specifier: workspace:*
+        version: link:../../workflowEngine
+      pg:
+        specifier: ^8.13.0
+        version: 8.23.1
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.5
+      '@types/pg':
+        specifier: ^8.11.0
+        version: 8.23.1
+
   workflowEngine:
     dependencies:
       kysely:
@@ -274,25 +293,6 @@ importers:
       kysely-codegen:
         specifier: ^0.20.0
         version: 0.20.0(kysely@0.29.8)(pg@8.23.1)(typescript@7.0.2)
-
-  workflows:
-    dependencies:
-      '@ratchet/api':
-        specifier: workspace:*
-        version: link:../api
-      '@ratchet/engine':
-        specifier: workspace:*
-        version: link:../workflowEngine
-      pg:
-        specifier: ^8.13.0
-        version: 8.23.1
-    devDependencies:
-      '@types/node':
-        specifier: ^22.0.0
-        version: 22.20.5
-      '@types/pg':
-        specifier: ^8.11.0
-        version: 8.23.1
 
 packages:
 

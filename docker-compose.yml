@@ -12,7 +12,7 @@ services:
       # These run only when the data volume is empty. After changing a schema
       # file, run `pnpm db:reset` (deletes all local data), then `pnpm db:types`.
       - ./workflowEngine/src/stores/postgres/schema.sql:/docker-entrypoint-initdb.d/001-engine.sql:ro
-      - ./workflows/payment/schema.sql:/docker-entrypoint-initdb.d/002-payment.sql:ro
+      - ./demo/workflows/payment/schema.sql:/docker-entrypoint-initdb.d/002-payment.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ratchet -d ratchet"]
       interval: 1s

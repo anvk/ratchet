@@ -1,6 +1,6 @@
 # ratchet
 
-## Run it
+## Run the demo
 
 You need Node 22 or newer, pnpm 12 and a Docker runtime such as OrbStack.
 
@@ -10,9 +10,12 @@ pnpm install
 pnpm dev
 ```
 
-Open <http://localhost:5173>, pick a workflow and press **Start run**. `pnpm dev` starts the demo: Postgres, the API, the orchestrator, three workers and the dashboard.
-How it all works is explained in [`docs/how-the-engine-works-v7.md`](docs/how-the-engine-works-v7.md)
-(earlier designs: [v1](docs/how-the-engine-works-v1.md), [v2](docs/how-the-engine-works-v2.md), [v3](docs/how-the-engine-works-v3.md), [v4](docs/how-the-engine-works-v4.md), [v5](docs/how-the-engine-works-v5.md), [v6](docs/how-the-engine-works-v6.md)).
+`pnpm dev` starts the demo: Postgres, the API, the orchestrator, three workers
+and the dashboard. Open the demo's dashboard at <http://localhost:5173>, pick
+a workflow and press **Start run**.
+
+How the engine works is explained in
+[`docs/how-the-engine-works.md`](docs/how-the-engine-works.md).
 
 ```sh
 pnpm test        # engine tests against real Postgres and worker processes
@@ -28,23 +31,23 @@ The example workflows are fake. No real money or payment provider is involved.
 
 ## Layout
 
-The engine is one package. Everything else in the repo is a demo built on it,
-to show it running; none of the demo is needed to use the engine.
+The engine is one package. Everything in `demo/` is built on it, to show it
+running; none of it is needed to use the engine.
 
 **The engine**
 
 | Path              | What's there                                                                                                                                                                                                                                                                                |
 | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `workflowEngine/` | Workers, the orchestrator, leases, retries, concurrency groups, schedules, the registry, the `WorkflowStore` interface, with Postgres in `src/stores/postgres/`, and the `MessageBroker` interface, with Postgres in `src/messageBrokers/postgres/`. What it promises is in `guarantees.md` |
-| `docs/`           | Walkthroughs of how the engine works, for newcomers. `how-the-engine-works-v7.md` describes the current engine                                                                                                                                                                              |
+| `docs/`           | `how-the-engine-works.md`, a walkthrough of how the engine works, for newcomers. `old/` holds walkthroughs of earlier designs                                                                                                                                                               |
 
 **Demo only**
 
-| Path         | What's there                                                                                                    |
-| ------------ | --------------------------------------------------------------------------------------------------------------- |
-| `workflows/` | Fake payment and greeting workflows, and the processes that run them (`api.ts`, `worker.ts`, `orchestrator.ts`) |
-| `api/`       | HTTP API for the dashboard. Reads the engine's tables directly and makes every change through the engine        |
-| `client/`    | The dashboard: runs list, live step diagram and event log, driven only by the HTTP API                          |
+| Path              | What's there                                                                                                    |
+| ----------------- | --------------------------------------------------------------------------------------------------------------- |
+| `demo/workflows/` | Fake payment and greeting workflows, and the processes that run them (`api.ts`, `worker.ts`, `orchestrator.ts`) |
+| `demo/api/`       | HTTP API for the dashboard. Reads the engine's tables directly and makes every change through the engine        |
+| `demo/client/`    | The dashboard: runs list, live step diagram and event log, driven only by the HTTP API                          |
 
 ## Use the engine
 
@@ -118,6 +121,57 @@ export const engine = createWorkflowEngine({
 `timeoutMs` is how long one attempt of a step may run before the worker gives
 up on it. It is the one setting without a default, so no step can hang forever
 without someone having chosen its limit. A step can set its own `timeoutMs`.
+
+### Run three kinds of process
+
+They only share the database, so each can run as its own process, container
+or pod.
+
+**Whatever starts runs**, such as your API. `sync()` saves each workflow's
+plan, which starting a run needs; call it once at startup. `startRun` only records
+the run and returns its id. Workers do the work.
+
+```ts
+// api.ts
+import { engine } from "./engine.ts";
+
+await engine.sync();
+
+const runId = await engine.startRun({ workflow: "stock-report", input: { ticker: "AAPL" } });
+```
+
+**Workers** claim ready steps and run them, until they're told to stop. Run
+as many as you need; two never get the same step.
+
+```ts
+// worker.ts
+import { closeOnSignals } from "@ratchet/engine";
+import { engine } from "./engine.ts";
+
+closeOnSignals(engine); // SIGTERM: stop claiming, finish running steps, then exit
+await engine.runWorker();
+await engine.close();
+```
+
+**One orchestrator**, which must be running: it is the only process that
+recovers lost steps, fires schedules and relays messages to workers. It gives a step to another worker
+when its worker stops sending heartbeats, for example because it crashed, and
+starts a run each time a schedule is due. It starts runs, so it calls `sync()`
+too.
+
+```ts
+// orchestrator.ts
+import { closeOnSignals } from "@ratchet/engine";
+import { engine } from "./engine.ts";
+
+await engine.sync();
+
+closeOnSignals(engine);
+await engine.runOrchestrator();
+await engine.close();
+```
+
+Workers don't call `sync()`.
 
 ### Messages, the outbox and the relay
 
@@ -221,57 +275,6 @@ count, not runs you start yourself or another schedule's. A run counts until it
 has succeeded, failed or been cancelled, so a run waiting in a concurrency
 group, or one you redrove, holds back the next tick too.
 
-### Run three kinds of process
-
-They only share the database, so each can run as its own process, container
-or pod.
-
-**Whatever starts runs**, such as your API. `sync()` saves each workflow's
-plan, which starting a run needs; call it once at startup. `startRun` only records
-the run and returns its id. Workers do the work.
-
-```ts
-// api.ts
-import { engine } from "./engine.ts";
-
-await engine.sync();
-
-const runId = await engine.startRun({ workflow: "stock-report", input: { ticker: "AAPL" } });
-```
-
-**Workers** claim ready steps and run them, until they're told to stop. Run
-as many as you need; two never get the same step.
-
-```ts
-// worker.ts
-import { closeOnSignals } from "@ratchet/engine";
-import { engine } from "./engine.ts";
-
-closeOnSignals(engine); // SIGTERM: stop claiming, finish running steps, then exit
-await engine.runWorker();
-await engine.close();
-```
-
-**One orchestrator**, which must be running: it is the only process that
-recovers lost steps, fires schedules and relays messages to workers. It gives a step to another worker
-when its worker stops sending heartbeats, for example because it crashed, and
-starts a run each time a schedule is due. It starts runs, so it calls `sync()`
-too.
-
-```ts
-// orchestrator.ts
-import { closeOnSignals } from "@ratchet/engine";
-import { engine } from "./engine.ts";
-
-await engine.sync();
-
-closeOnSignals(engine);
-await engine.runOrchestrator();
-await engine.close();
-```
-
-Workers don't call `sync()`.
-
 ### Running in containers
 
 - Build all three from one image and choose the entry file with the command,
@@ -292,7 +295,7 @@ Workers don't call `sync()`.
   out connections per transaction, such as PgBouncer in transaction mode, can't
   deliver notifications.
 
-The `workflows/` folder is a working example of this setup, with the
+The `demo/workflows/` folder is a working example of this setup, with the
 dashboard on top.
 
 ## Data model
