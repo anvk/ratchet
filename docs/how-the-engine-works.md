@@ -1,4 +1,4 @@
-# How the engine works (v7)
+# How the engine works
 
 Here's the whole engine from the ground up, using one example throughout: the fake **payment** workflow.
 
@@ -32,7 +32,7 @@ The engine's answer is simple: **keep all progress in the database, not in memor
 
 ## 2. Writing a workflow (the "recipe")
 
-You describe a workflow with `defineWorkflow` (`workflows/payment/workflow.ts`):
+You describe a workflow with `defineWorkflow` (`demo/workflows/payment/workflow.ts`):
 
 ```ts
 defineWorkflow({
@@ -179,7 +179,7 @@ A lease works the same way for a step:
 
 ## 8. The orchestrator: when a worker goes silent
 
-The orchestrator (`workflows/orchestrator.ts`) is a separate process running a loop. It has three jobs: this section's, starting scheduled runs (section 15), and relaying messages to workers (section 19). Workers do neither, so an orchestrator has to be running: without one, a step whose worker went silent stays `running`, and no schedule fires. Every second (`sweepIntervalMs`) it **sweeps**: it looks for `running` steps whose lease has expired, makes each one **`ready`** again, clears its worker, and writes a `step_lease_expired` event. The next worker that asks claims it as **attempt 2**.
+The orchestrator (`demo/workflows/orchestrator.ts`) is a separate process running a loop. It has three jobs: this section's, starting scheduled runs (section 15), and relaying messages to workers (section 19). Workers do neither, so an orchestrator has to be running: without one, a step whose worker went silent stays `running`, and no schedule fires. Every second (`sweepIntervalMs`) it **sweeps**: it looks for `running` steps whose lease has expired, makes each one **`ready`** again, clears its worker, and writes a `step_lease_expired` event. The next worker that asks claims it as **attempt 2**.
 
 **A worker crashes:**
 
@@ -573,7 +573,7 @@ A skipped tick has no run of its own to write an event on, so the event goes on 
 
 ## 16. Claim order: which step a worker picks next
 
-When several steps are ready, which one does a worker take? That's the `claimOrder` setting (`workflows/engine.ts`):
+When several steps are ready, which one does a worker take? That's the `claimOrder` setting (`demo/workflows/engine.ts`):
 
 - **`sticky` (default):** when a worker finishes a step, it takes the **next step of the same run** right away, inside the same transaction, with a fresh lease. So a run goes start to finish on one worker, apart from branches: if two steps become ready at once, it keeps the first and another worker takes the other. With 3 workers and 10 runs: about 3 run at a time, each finishing quickly.
 - **`fair`:** take whichever step has waited longest. Runs take turns, so all 10 start and move forward together.

@@ -1,8 +1,8 @@
 packages:
   - workflowEngine
-  - api
-  - workflows
-  - client
+  - demo/api
+  - demo/workflows
+  - demo/client
 
 allowBuilds:
   esbuild: true
