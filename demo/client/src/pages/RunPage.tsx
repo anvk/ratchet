@@ -83,8 +83,9 @@ export function RunPage() {
   const { run, steps } = data;
   const runningStep = steps.find((s) => s.status === "running");
   const failedStep = steps.find((s) => s.status === "failed");
+  // Undefined until the workflow has asked for its first step.
   const selectedStep =
-    steps.find((s) => s.name === pickedStepName) ?? runningStep ?? failedStep ?? steps.at(-1)!;
+    steps.find((s) => s.name === pickedStepName) ?? runningStep ?? failedStep ?? steps.at(-1);
 
   return (
     <>
@@ -110,7 +111,7 @@ export function RunPage() {
             <Button
               disabled={cancel.isPending}
               onClick={() => cancel.mutate()}
-              title="Stops this run: steps that haven't started are skipped and the running step's result is discarded. You can resume it afterwards."
+              title="Stops this run: a step that is running is stopped and its result discarded. You can resume it afterwards."
             >
               Cancel run
             </Button>
@@ -120,7 +121,7 @@ export function RunPage() {
               variant="primary"
               disabled={redrive.isPending}
               onClick={() => redrive.mutate()}
-              title="Runs the steps that didn't succeed again, with fresh attempts. Steps that succeeded keep their results."
+              title="Runs the workflow again from where it stopped. Steps that succeeded keep their results; the rest run again with fresh attempts."
             >
               Resume run
             </Button>
@@ -145,12 +146,27 @@ export function RunPage() {
 
       <FlowDiagram
         steps={steps}
-        selectedStepName={selectedStep.name}
+        selectedStepName={selectedStep?.name ?? null}
         onSelect={setPickedStepName}
       />
 
+      {run.status === "succeeded" && (
+        <Panel className="mt-4">
+          <h2 className="mb-3 font-semibold">Output</h2>
+          <pre className="overflow-x-auto rounded-md bg-grey-soft p-2.5 font-mono text-xs/normal">
+            {JSON.stringify(run.output, null, 2)}
+          </pre>
+        </Panel>
+      )}
+
       <div className="mt-4 grid grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)] gap-4 max-[720px]:grid-cols-1">
-        <StepDetail step={selectedStep} />
+        {selectedStep ? (
+          <StepDetail step={selectedStep} />
+        ) : (
+          <Panel>
+            <p className="text-muted">No steps yet: the workflow hasn't asked for one.</p>
+          </Panel>
+        )}
         <Panel>
           <h2 className="mb-3 font-semibold">Events</h2>
           <ol>

@@ -14,7 +14,7 @@ import { fakeStore } from "./fakeStore.ts";
 const report = defineWorkflow({
   name: "report",
   version: "1",
-  steps: [{ name: "build", run: async () => {} }],
+  run: (ctx) => ctx.step("build", () => {}),
 });
 
 /** An engine with one workflow, "report", over a store that counts the schedule calls it gets. */

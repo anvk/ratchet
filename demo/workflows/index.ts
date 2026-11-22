@@ -3,8 +3,8 @@ import { presets as greetingPresets } from "./greeting/presets.ts";
 import payment from "./payment/workflow.ts";
 import { presets as paymentPresets } from "./payment/presets.ts";
 
-// To add a workflow, create workflows/<name>/workflow.ts and list it here, with
-// its labels. The engine and dashboard pick it up with no other changes.
+// To add a workflow, create <name>/workflow.ts beside this file and list it
+// here, with its labels. The engine and dashboard pick it up with no other changes.
 export const workflows = [payment.definition, greeting.definition];
 
 // Optional, and only for the dashboard: ready-made inputs, by workflow name.

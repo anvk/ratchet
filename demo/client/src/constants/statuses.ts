@@ -21,7 +21,7 @@ export type StepDisplayStatus = StepRunStatus | "retrying";
 
 /** Labels for step statuses, as on the diagram and in the step details. */
 export const STEP_STATUS_LABELS: Record<StepDisplayStatus, string> = {
-  pending: "Pending",
+  pending: "Waiting to run again",
   ready: "Ready",
   retrying: "Retrying",
   running: "Running",
@@ -35,8 +35,10 @@ export const FAILURE_REASON_LABELS: Record<FailureReason, string> = {
   non_retryable: "Not retryable",
   attempts_exhausted: "Out of attempts",
   lost_worker: "Kept losing its worker",
-  unknown_step: "No worker knows this step",
-  cancelled: "Cancelled",
+  unknown_step: "The workflow no longer asks for this step",
+  cancelled: "Stopped",
+  nondeterministic: "The workflow took a different path",
+  workflow_error: "Error in the workflow's code",
 };
 
 /** Pill colours for run statuses. */

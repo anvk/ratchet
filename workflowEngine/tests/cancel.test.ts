@@ -13,14 +13,14 @@ import { cancellable, exclusive, pipeline } from "./fixtures/workflows.ts";
 before(() => startWorkers(4));
 after(() => stopWorkers());
 
-/** Two steps no worker has code for, so a run of it stays queued. */
+/** A workflow no worker has code for, so a run of it stays queued, with no steps. */
 const unclaimed = defineWorkflow({
   name: "cancel-unclaimed",
   version: "1",
-  steps: [
-    { name: "one", run: async () => null },
-    { name: "two", run: async () => null },
-  ],
+  async run(ctx) {
+    await ctx.step("one", () => null);
+    await ctx.step("two", () => null);
+  },
 });
 
 /** Polls until the check passes, and throws after the deadline. */
@@ -84,7 +84,7 @@ const waitForWork = (runId: string) =>
     "work to be running",
   );
 
-test("cancelling a run nobody has started skips every step", async () => {
+test("cancelling a run nobody has started leaves it with no steps", async () => {
   await createWorkflowEngine({
     messageBroker: createPollingMessageBroker(),
     workflows: [unclaimed],
@@ -99,16 +99,12 @@ test("cancelling a run nobody has started skips every step", async () => {
   assert.equal(run.status, "cancelled");
   assert.equal(run.failure_reason, null);
   assert.notEqual(run.finished_at, null);
-  assert.deepEqual(
-    (await stepRows(runId)).map((s) => s.status),
-    ["skipped", "skipped"],
-  );
-  const types = await eventTypes(runId);
-  assert.deepEqual(types.slice(-3), ["step_skipped", "step_skipped", "run_cancelled"]);
-  assert.ok(!types.includes("step_failed"));
+  // Its code never ran, so it never asked for a step.
+  assert.deepEqual(await stepRows(runId), []);
+  assert.deepEqual(await eventTypes(runId), ["run_queued", "run_cancelled"]);
 });
 
-test("cancelling a running run fails its running step and skips the rest", async () => {
+test("cancelling a running run fails its running step, and nothing after it is ever asked for", async () => {
   const runId = await startCancellable({ ms: 1500 });
   await waitForWork(runId);
 
@@ -121,7 +117,7 @@ test("cancelling a running run fails its running step and skips the rest", async
   assert.equal(work.status, "failed");
   assert.equal(work.failure_reason, "cancelled");
   assert.equal(work.error, "Run cancelled");
-  assert.equal(after.status, "skipped");
+  assert.equal(after, undefined);
 });
 
 test("a cancelled run is not a failed run", async () => {
@@ -133,10 +129,9 @@ test("a cancelled run is not a failed run", async () => {
   const run = await runRow(runId);
   assert.equal(run.status, "cancelled");
   assert.equal(run.failure_reason, null);
-  const [work, after] = await stepRows(runId);
+  const [work] = await stepRows(runId);
   assert.equal(work.status, "failed");
   assert.equal(work.failure_reason, "cancelled");
-  assert.equal(after.status, "skipped");
 });
 
 test("a cancelled step's late result is rejected", async () => {

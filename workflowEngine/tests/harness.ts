@@ -11,7 +11,10 @@ import {
   createWorkflowEngine,
   createPollingMessageBroker,
   FINISHED_RUN_STATUSES,
+  type AdvanceRun,
+  type WorkflowDefinition,
 } from "../src/index.ts";
+import { advance } from "../src/workflowEngine.replay.ts";
 import { createPostgresStore, db } from "../src/stores/postgres/index.ts";
 import { scheduledWorkflows, workflows } from "./fixtures/workflows.ts";
 
@@ -19,6 +22,24 @@ const WORKER = fileURLToPath(new URL("./fixtures/worker.ts", import.meta.url));
 const SCHEMA = fileURLToPath(new URL("../src/stores/postgres/schema.sql", import.meta.url));
 
 export const store = createPostgresStore();
+
+/**
+ * What an engine gives the store to run a workflow's code with, for tests that
+ * call the store by hand. Only knows the workflows it is given.
+ */
+export function advanceFor(definitions: WorkflowDefinition[]): AdvanceRun {
+  return ({ workflow, runId, input, steps, after }) => {
+    const definition = definitions.find((d) => d.name === workflow);
+    if (!definition) throw new Error(`No code for workflow ${workflow}`);
+    return advance({ run: definition.run, runId, input, steps, after });
+  };
+}
+
+/** Advances runs of these workflows by hand until none is marked, as an idle worker would. */
+export async function advanceAll(definitions: WorkflowDefinition[]) {
+  const advanceRun = advanceFor(definitions);
+  while (await store.advanceRun({ workflows: definitions, advance: advanceRun }));
+}
 
 const workers: ChildProcess[] = [];
 const workerIds = new Map<ChildProcess, string>();

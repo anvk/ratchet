@@ -107,8 +107,13 @@ test("a step that keeps failing fails its run after maxAttempts", async () => {
   assert.equal(step.attempt, 4, "maxAttempts is 4");
   assert.equal(step.error, "Timed out on attempt 4");
   assert.equal((await eventsOf(runId, "step_retry_scheduled")).length, 3);
-  const after = await outcome(runId, "after");
-  assert.equal(after.step.status, "skipped");
+  const after = await db
+    .selectFrom("step_runs")
+    .select("id")
+    .where("run_id", "=", runId)
+    .where("name", "=", "after")
+    .execute();
+  assert.deepEqual(after, [], "what came after the failed step is never asked for");
 });
 
 test("a NonRetryableError fails the run at once", async () => {

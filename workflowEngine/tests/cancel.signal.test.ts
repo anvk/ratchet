@@ -11,7 +11,7 @@ import { cancellable } from "./fixtures/workflows.ts";
 before(() => startWorkers(1));
 after(() => stopWorkers());
 
-test("a cancelled step hears through ctx.signal", async () => {
+test("a cancelled step hears through its abort signal", async () => {
   const a = await store.startRun({ definition: cancellable, input: { untilSignal: true } });
   const deadline = Date.now() + 10_000;
   for (;;) {
@@ -20,8 +20,9 @@ test("a cancelled step hears through ctx.signal", async () => {
       .select("status")
       .where("run_id", "=", a)
       .where("name", "=", "work")
-      .executeTakeFirstOrThrow();
-    if (work.status === "running") break;
+      .executeTakeFirst();
+    // The step isn't there until the workflow has asked for it.
+    if (work?.status === "running") break;
     assert.ok(Date.now() < deadline, "work never started running");
     await sleep(20);
   }

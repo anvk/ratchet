@@ -1,4 +1,12 @@
-import { signalWorker, startWorkers, stopWorkers, store, waitForFinish } from "./harness.ts";
+import {
+  advanceAll,
+  advanceFor,
+  signalWorker,
+  startWorkers,
+  stopWorkers,
+  store,
+  waitForFinish,
+} from "./harness.ts";
 
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
@@ -47,6 +55,15 @@ const workStep = (runId: string) =>
     .where("run_id", "=", runId)
     .where("name", "=", "work")
     .executeTakeFirstOrThrow();
+
+/** The same, or undefined while the workflow hasn't asked for the step yet. */
+const workStepIfAsked = (runId: string) =>
+  db
+    .selectFrom("step_runs")
+    .select(["status", "attempt", "worker_id", "output"])
+    .where("run_id", "=", runId)
+    .where("name", "=", "work")
+    .executeTakeFirst();
 
 /** A run's events of one type. */
 const eventsOf = (runId: string, type: string) =>
@@ -106,17 +123,14 @@ test("a step's own leaseMs wins over the default, and the sticky handoff gets a 
   const leased = defineWorkflow({
     name: "leased",
     version: "1",
-    steps: [
-      {
-        name: "own",
-        leaseMs: 1234,
-        run: async () => 1,
-      },
-      { name: "default", run: async () => 2 },
-    ],
+    async run(ctx) {
+      await ctx.step("own", () => 1, { leaseMs: 1234 });
+      await ctx.step("default", () => 2);
+    },
   });
   await store.syncWorkflows([leased]);
   const runId = await store.startRun({ definition: leased });
+  await advanceAll([leased]);
 
   /** How long the lease on a step was set for, measured in the database. */
   const leaseLength = (name: string) =>
@@ -144,6 +158,7 @@ test("a step's own leaseMs wins over the default, and the sticky handoff gets a 
     output: 1,
     claimNext: true,
     defaults,
+    advance: advanceFor([leased]),
   });
   assert.equal(next?.stepName, "default");
   assert.equal(next?.leaseMs, 60_000);
@@ -154,10 +169,11 @@ test("a swept step can't be renewed or finished by the worker that lost it", asy
   const lost = defineWorkflow({
     name: "lost",
     version: "1",
-    steps: [{ name: "only", run: async () => null }],
+    run: (ctx) => ctx.step("only", () => null),
   });
   await store.syncWorkflows([lost]);
   const runId = await store.startRun({ definition: lost });
+  await advanceAll([lost]);
   const claim = await store.claimStep({
     workerId: "test",
     workflows: [lost],
@@ -187,31 +203,18 @@ test("a swept step can't be renewed or finished by the worker that lost it", asy
     output: "late",
     claimNext: false,
     defaults,
+    advance: advanceFor([lost]),
   });
   assert.equal(completed, false);
   assert.equal((await eventsOf(runId, "step_lease_expired")).length, 1);
-});
-
-test("defineWorkflow rejects a leaseMs that isn't a whole, positive number", () => {
-  for (const leaseMs of [0, -5, 1.5]) {
-    assert.throws(
-      () =>
-        defineWorkflow({
-          name: "bad",
-          version: "1",
-          steps: [{ name: "only", leaseMs, run: async () => null }],
-        }),
-      /needs a whole, positive leaseMs/,
-    );
-  }
 });
 
 // Last, because it leaves one worker fewer for the tests after it.
 test("a step whose worker is killed goes to another worker", async () => {
   const runId = await store.startRun({ definition: slow, input: { waitMs: 30_000 } });
   const running = await waitFor(async () => {
-    const work = await workStep(runId);
-    return work.status === "running" ? work : undefined;
+    const work = await workStepIfAsked(runId);
+    return work?.status === "running" ? work : undefined;
   });
   signalWorker(running.worker_id!, "SIGKILL");
   await waitForFinish([runId], 10_000);

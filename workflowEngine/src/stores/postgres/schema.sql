@@ -1,20 +1,20 @@
 -- The Postgres store's schema. db/schema.gen.ts is generated from it
 -- (pnpm db:types), and Docker Compose and the tests apply it.
 --
--- Two kinds of data, like a recipe and cooking that recipe tonight:
---   the plan:      workflows, steps, schedules
---   the execution: workflow_runs, step_runs, events
--- and outbox, which holds messages on their way to the message broker.
+-- What is saved:
+--   workflows, schedules              what can be run, and when
+--   workflow_runs, step_runs, events  what has been run, and what happened
+--   outbox                            messages on their way to the message broker
 
 CREATE TYPE workflow_run_status AS ENUM ('queued', 'running', 'succeeded', 'failed', 'cancelled');
 
 CREATE TYPE step_run_status AS ENUM (
-  'pending',   -- a step it needs has not finished
+  'pending',   -- put back by a redrive; ready again once the workflow asks for it
   'ready',     -- can be claimed now
   'running',
   'succeeded',
   'failed',
-  'skipped'    -- never started, because a step it depends on failed or its run was cancelled
+  'skipped'    -- asked for and never started, because its run finished or was cancelled first
 );
 
 -- Why a step, and so its run, failed. Statuses say what can happen next, and
@@ -23,43 +23,22 @@ CREATE TYPE failure_reason AS ENUM (
   'non_retryable',      -- the step threw a NonRetryableError, like a declined payment
   'attempts_exhausted', -- it kept throwing until it ran out of attempts
   'lost_worker',        -- it kept losing its worker until it ran out of attempts
-  'unknown_step',       -- no worker running it had code for the step
-  'cancelled'           -- the step was running when its run was cancelled
+  'unknown_step',       -- the workflow's code never asked for the step when a worker went to run it
+  'cancelled',          -- the step was running when its run was cancelled, or when its workflow finished without it
+  'nondeterministic',   -- the workflow didn't take the path its saved steps say it took before
+  'workflow_error'      -- the workflow's own code threw an error that wasn't a step's
 );
 
--- One row per version of a workflow, copied from the registry at API startup.
--- Plan rows never change. Editing a workflow creates a new version, so past
--- runs keep showing the steps they actually ran.
+-- One row per version of a workflow, saved by sync. A workflow is code, so
+-- there is nothing else to save about it: a run belongs to the version it
+-- started on, and only workers with that version work on it.
 CREATE TABLE workflows (
   id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   name        text NOT NULL,
   -- The `version` its author gave the definition, such as "2".
   version     text NOT NULL,
-  -- Hash of the name, that version and the steps. This, not version, is what
-  -- tells two versions apart: an edit to the steps changes it even when the
-  -- author's version stays the same.
-  plan_hash   text NOT NULL,
   created_at  timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (name, plan_hash)
-);
-
-CREATE TABLE steps (
-  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  workflow_id uuid NOT NULL REFERENCES workflows (id) ON DELETE CASCADE,
-  name        text NOT NULL,
-  position    int  NOT NULL,
-  -- Steps that must succeed before this one can start. They always come
-  -- earlier in position, so the steps can't form a loop.
-  needs       text[] NOT NULL DEFAULT '{}',
-  -- How long a worker may go without a heartbeat before the step is given to
-  -- another worker. Null means the engine's default.
-  lease_ms    int  CHECK (lease_ms > 0),
-  -- How many times the step may run before its run fails, and the first wait
-  -- before a retry (doubling each time). Null means the engine's defaults.
-  max_attempts int CHECK (max_attempts > 0),
-  backoff_ms   int CHECK (backoff_ms >= 0),
-  UNIQUE (workflow_id, name),
-  UNIQUE (workflow_id, position)
+  UNIQUE (name, version)
 );
 
 -- One row per schedule: a workflow to start, when, and with what. Created and
@@ -113,6 +92,12 @@ CREATE TABLE workflow_runs (
   -- When the run was given a slot. Null while it waits for one; a run in no
   -- group is admitted when it starts.
   admitted_at timestamptz,
+  -- Set when something has happened that the workflow's code should see: the
+  -- run was admitted or redriven, or a step failed for good with no worker at
+  -- hand. A worker with the run's version runs the code again and clears it.
+  advance_at  timestamptz,
+  -- What the workflow's code returned. Null until the run succeeds.
+  output      jsonb,
   -- Set for a run a schedule started: the schedule's id, and the tick it was
   -- for. Not a foreign key, so that deleting a schedule touches only the
   -- schedule's row and never locks or updates its runs.
@@ -136,17 +121,25 @@ CREATE INDEX workflow_runs_group_idx ON workflow_runs (concurrency_key, created_
 CREATE INDEX workflow_runs_schedule_open_idx ON workflow_runs (schedule_id, created_at, id)
   WHERE schedule_id IS NOT NULL AND finished_at IS NULL;
 
+-- Lets a worker find a run whose code should be run again.
+CREATE INDEX workflow_runs_advance_idx ON workflow_runs (advance_at)
+  WHERE advance_at IS NOT NULL;
+
 CREATE TABLE step_runs (
   id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   run_id      uuid NOT NULL REFERENCES workflow_runs (id) ON DELETE CASCADE,
-  -- Nullable, with name and position stored here, so an agent workflow can add
-  -- steps at runtime that were never in the plan.
-  step_id     uuid REFERENCES steps (id),
   name        text NOT NULL,
+  -- The order in which the workflow first asked for its steps.
   position    int  NOT NULL,
-  status      step_run_status NOT NULL DEFAULT 'pending',
-  -- Copied from the plan, so a step added at runtime can have needs too.
-  needs       text[] NOT NULL DEFAULT '{}',
+  status      step_run_status NOT NULL DEFAULT 'ready',
+  -- The steps this one came straight after: the workflow needed their results
+  -- before it asked for this one. For drawing a run, not for deciding anything.
+  asked_after text[] NOT NULL DEFAULT '{}',
+  -- The settings the workflow gave where it asked for the step. Null means the
+  -- engine's default.
+  lease_ms     int CHECK (lease_ms > 0),
+  max_attempts int CHECK (max_attempts > 0),
+  backoff_ms   int CHECK (backoff_ms >= 0),
   attempt     int  NOT NULL DEFAULT 0,
   -- Attempts made before the run was last redriven. Attempt numbers never go
   -- back, so a worker from before can't match a new attempt; maxAttempts

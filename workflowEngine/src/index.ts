@@ -15,19 +15,29 @@ export type {
   MessageBroker,
   Registry,
   ScheduledRun,
+  AdvanceRun,
+  AskedStep,
+  Decision,
+  ReplayRequest,
+  SavedStep,
   StepDefaults,
-  StepContext,
-  StepDefinition,
+  StepFunction,
+  StepOptions,
+  StepRunContext,
+  WorkflowContext,
+  WorkflowFunction,
   WorkflowConcurrency,
   WorkflowDefinition,
   WorkflowEngine,
   WorkflowEngineSettings,
   WorkflowStore,
 } from "./workflowEngine.types.ts";
+export { advance, locate } from "./workflowEngine.replay.ts";
 export { closeOnSignals, createWorkflowEngine, defineWorkflow } from "./workflowEngine.ts";
 export {
   InvalidScheduleError,
   NonRetryableError,
+  StepFailedError,
   UnknownWorkflowError,
 } from "./workflowEngine.errors.ts";
 export { canRedrive } from "./workflowEngine.utils.ts";

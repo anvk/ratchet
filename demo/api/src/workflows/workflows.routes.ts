@@ -11,13 +11,14 @@ export function workflowsRoutes({
   presets = {},
   labels,
 }: { app: FastifyInstance; engine: WorkflowEngine } & ApiOptions) {
-  // Past runs read their plan from the database, not from here.
   app.get("/workflows", async (): Promise<WorkflowsResponse> => ({
     workflows: [...engine.registry.values()].map((workflow) => ({
       name: workflow.name,
       ...workflowLabel({ labels, workflow: workflow.name }),
       presets: presets[workflow.name] ?? [],
-      steps: workflow.steps.map(({ name }) => ({
+      // A workflow is code, so the engine can't list its steps. These are the
+      // ones the app has labels for.
+      steps: Object.keys(labels?.[workflow.name]?.steps ?? {}).map((name) => ({
         name,
         ...stepLabel({ labels, workflow: workflow.name, step: name }),
       })),

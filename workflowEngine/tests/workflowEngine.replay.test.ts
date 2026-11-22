@@ -58,7 +58,7 @@ test("a function parks on the first step it has no result for", async () => {
 
   assert.deepEqual(decision, {
     kind: "parked",
-    requested: [{ name: "first", options: { maxAttempts: 5 } }],
+    requested: [{ name: "first", options: { maxAttempts: 5 }, after: [] }],
     waitingOn: ["first"],
   });
 });
@@ -72,12 +72,12 @@ test("saved steps hand back their outputs without running, and the function goes
 
   assert.deepEqual(await advance(requestFor(run, { first: succeeded(1) })), {
     kind: "parked",
-    requested: [{ name: "second", options: {} }],
+    requested: [{ name: "second", options: {}, after: ["first"] }],
     waitingOn: ["second"],
   });
   assert.deepEqual(await advance(requestFor(run, { first: succeeded(1), second: succeeded(2) })), {
     kind: "parked",
-    requested: [{ name: "third", options: {} }],
+    requested: [{ name: "third", options: {}, after: ["second"] }],
     waitingOn: ["third"],
   });
   assert.deepEqual(
@@ -108,8 +108,8 @@ test("steps asked for together are requested together, and the function goes on 
   assert.deepEqual(await advance(requestFor(run)), {
     kind: "parked",
     requested: [
-      { name: "left", options: {} },
-      { name: "right", options: {} },
+      { name: "left", options: {}, after: [] },
+      { name: "right", options: {}, after: [] },
     ],
     waitingOn: ["left", "right"],
   });
@@ -121,7 +121,11 @@ test("steps asked for together are requested together, and the function goes on 
   });
   assert.deepEqual(
     await advance(requestFor(run, { left: succeeded("l"), right: succeeded("r") })),
-    { kind: "parked", requested: [{ name: "join", options: {} }], waitingOn: ["join"] },
+    {
+      kind: "parked",
+      requested: [{ name: "join", options: {}, after: ["left", "right"] }],
+      waitingOn: ["join"],
+    },
   );
 });
 
@@ -159,7 +163,7 @@ test("a function can catch a step's failure and carry on", async () => {
 
   assert.deepEqual(await advance(requestFor(run, { charge: failed("card declined") })), {
     kind: "parked",
-    requested: [{ name: "refund", options: {} }],
+    requested: [{ name: "refund", options: {}, after: ["charge"] }],
     waitingOn: ["refund"],
   });
   assert.ok(caught instanceof StepFailedError);
@@ -268,7 +272,7 @@ test("a function whose path depends on which step finished first is caught", asy
   const first = await advance(requestFor(run, { fast: open, slow: succeeded("slow") }));
   assert.deepEqual(first, {
     kind: "parked",
-    requested: [{ name: "after-slow", options: {} }],
+    requested: [{ name: "after-slow", options: {}, after: ["slow"] }],
     waitingOn: ["fast", "after-slow"],
   });
 
@@ -303,7 +307,7 @@ test("a step may be named like something every object has", async () => {
 
   assert.deepEqual(await advance(requestFor(run)), {
     kind: "parked",
-    requested: [{ name: "toString", options: {} }],
+    requested: [{ name: "toString", options: {}, after: [] }],
     waitingOn: ["toString"],
   });
   assert.deepEqual(await advance(requestFor(run, { toString: succeeded("ok") })), {
@@ -362,6 +366,86 @@ test("a run with a thousand saved steps replays to the end", async () => {
   );
 
   assert.deepEqual(await advance(requestFor(run, steps)), { kind: "completed", output: 1000 });
+});
+
+test("a step with options that make no sense fails the run", async () => {
+  const decision = await advance(
+    requestFor(async (ctx) => {
+      await Promise.all([
+        ctx.step("a", mustNotRun, { maxAttempts: 0 }),
+        ctx.step("b", mustNotRun, { backoffMs: -1, leaseMs: 1.5 }),
+        ctx.step("c", mustNotRun, { backoffMs: 0, timeoutMs: 1 }),
+      ]);
+    }),
+  );
+
+  assert.deepEqual(decision, {
+    kind: "failed",
+    reason: "workflow_error",
+    error:
+      "Step a needs a whole, positive maxAttempts; Step b needs a whole, positive leaseMs; Step b needs a whole backoffMs of 0 or more",
+  });
+});
+
+test("a new step comes straight after only the steps the function needed before asking for it", async () => {
+  // load, then charge and reserve side by side, then ship after both; and an
+  // audit that only waits for the charge.
+  const run: WorkflowFunction = async (ctx) => {
+    await ctx.step("load", mustNotRun);
+    const charge = ctx.step("charge", mustNotRun);
+    const reserve = ctx.step("reserve", mustNotRun);
+    const audit = charge.then(() => ctx.step("audit", mustNotRun));
+    const ship = Promise.all([charge, reserve]).then(() => ctx.step("ship", mustNotRun));
+    return Promise.all([audit, ship]);
+  };
+  /** What each newly asked-for step comes after, given what is saved. */
+  const afterOf = async (steps: Record<string, SavedStep>, after?: Record<string, string[]>) => {
+    const decision = await advance({ ...requestFor(run, steps), after });
+    assert.equal(decision.kind, "parked");
+    return Object.fromEntries(
+      decision.kind === "parked" ? decision.requested.map((r) => [r.name, r.after]) : [],
+    );
+  };
+  const done = succeeded(null);
+
+  assert.deepEqual(await afterOf({}), { load: [] });
+  assert.deepEqual(await afterOf({ load: done }), { charge: ["load"], reserve: ["load"] });
+  // reserve happens to be done too, but the audit didn't wait for it.
+  assert.deepEqual(await afterOf({ load: done, charge: done, reserve: done }), {
+    audit: ["charge"],
+    ship: ["charge", "reserve"],
+  });
+  // The audit finished first; shipping still doesn't come after it.
+  assert.deepEqual(await afterOf({ load: done, charge: done, reserve: done, audit: done }), {
+    ship: ["charge", "reserve"],
+  });
+  // Knowing what the saved steps came after changes nothing but the work done.
+  assert.deepEqual(
+    await afterOf(
+      { load: done, charge: done, reserve: done, audit: done },
+      { load: [], charge: ["load"], reserve: ["load"], audit: ["charge"] },
+    ),
+    { ship: ["charge", "reserve"] },
+  );
+});
+
+test("a step after a failure the function caught comes straight after the step that failed", async () => {
+  const run: WorkflowFunction = async (ctx) => {
+    await ctx.step("load", mustNotRun);
+    try {
+      await ctx.step("charge", mustNotRun);
+    } catch {
+      await ctx.step("refund", mustNotRun);
+    }
+  };
+
+  const decision = await advance(requestFor(run, { load: succeeded(1), charge: failed() }));
+
+  assert.deepEqual(decision, {
+    kind: "parked",
+    requested: [{ name: "refund", options: {}, after: ["charge"] }],
+    waitingOn: ["refund"],
+  });
 });
 
 // ---------------------------------------------------------------------------

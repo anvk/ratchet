@@ -5,11 +5,19 @@
 
 import type { ColumnType } from "kysely";
 
-export type FailureReason = "attempts_exhausted" | "cancelled" | "lost_worker" | "non_retryable" | "unknown_step";
+export type FailureReason =
+  | "attempts_exhausted"
+  | "cancelled"
+  | "lost_worker"
+  | "non_retryable"
+  | "nondeterministic"
+  | "unknown_step"
+  | "workflow_error";
 
-export type Generated<T> = T extends ColumnType<infer S, infer I, infer U>
-  ? ColumnType<S, I | undefined, U>
-  : ColumnType<T, T | undefined, T>;
+export type Generated<T> =
+  T extends ColumnType<infer S, infer I, infer U>
+    ? ColumnType<S, I | undefined, U>
+    : ColumnType<T, T | undefined, T>;
 
 export type Int8 = ColumnType<string, bigint | number | string, bigint | number | string>;
 
@@ -63,14 +71,17 @@ export interface Schedules {
 }
 
 export interface StepRuns {
+  asked_after: Generated<string[]>;
   attempt: Generated<number>;
+  backoff_ms: number | null;
   error: string | null;
   failure_reason: FailureReason | null;
   finished_at: Timestamp | null;
   id: Generated<string>;
   lease_expires_at: Timestamp | null;
+  lease_ms: number | null;
+  max_attempts: number | null;
   name: string;
-  needs: Generated<string[]>;
   output: Json | null;
   position: number;
   prior_attempts: Generated<number>;
@@ -78,23 +89,12 @@ export interface StepRuns {
   run_id: string;
   started_at: Timestamp | null;
   status: Generated<StepRunStatus>;
-  step_id: string | null;
   worker_id: string | null;
-}
-
-export interface Steps {
-  backoff_ms: number | null;
-  id: Generated<string>;
-  lease_ms: number | null;
-  max_attempts: number | null;
-  name: string;
-  needs: Generated<string[]>;
-  position: number;
-  workflow_id: string;
 }
 
 export interface WorkflowRuns {
   admitted_at: Timestamp | null;
+  advance_at: Timestamp | null;
   concurrency_key: string | null;
   concurrency_limit: number | null;
   created_at: Generated<Timestamp>;
@@ -103,6 +103,7 @@ export interface WorkflowRuns {
   id: Generated<string>;
   idempotency_key: string | null;
   input: Generated<Json>;
+  output: Json | null;
   schedule_id: string | null;
   scheduled_for: Timestamp | null;
   started_at: Timestamp | null;
@@ -115,7 +116,6 @@ export interface Workflows {
   created_at: Generated<Timestamp>;
   id: Generated<string>;
   name: string;
-  plan_hash: string;
   version: string;
 }
 
@@ -124,7 +124,6 @@ export interface DB {
   outbox: Outbox;
   schedules: Schedules;
   step_runs: StepRuns;
-  steps: Steps;
   workflow_runs: WorkflowRuns;
   workflows: Workflows;
 }

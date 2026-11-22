@@ -6,7 +6,7 @@ Here's the whole engine from the ground up, using one example throughout: the fa
 
 ## 1. The big idea
 
-A **workflow** is a set of **steps**, where some steps need others to finish first:
+A **workflow** is a piece of code that asks for **steps**. A step is one piece of real work, such as a call to another service. Some steps come after others, and some run side by side:
 
 ```
                                     ┌→ score-risk ───────┐
@@ -18,7 +18,7 @@ The risk and sanctions checks don't need each other, so they run at the same tim
 
 - The process crashes halfway. Which steps already happened?
 - You run 3 worker processes for speed. How do you stop two of them doing the same step?
-- Two steps finish at the same moment on two workers. Who starts the step that needs both, and how do you make sure it starts exactly once?
+- Two steps finish at the same moment on two workers. Who starts the step that comes after both, and how do you make sure it starts exactly once?
 - A worker freezes, or its machine disappears, in the middle of a step. Who finishes that step, and how does anyone notice?
 - A step fails because a service hiccuped. Should it try again, and how soon?
 - A retry repeats a write that already happened. What stops a double charge?
@@ -26,112 +26,143 @@ The risk and sanctions checks don't need each other, so they run at the same tim
 - Two payments from the same account run at the same time. How do you stop both passing the balance check before either has posted?
 - You need to deploy. How do you stop without cutting a step off mid-way?
 
-The engine's answer is simple: **keep all progress in the database, not in memory.** Workers are disposable. They read "what needs doing next" from Postgres, do it, and write the result back. If a worker dies, the progress it already saved is still there, and the step it was in the middle of goes to another worker. If a step fails, only that step runs again.
+The engine's answer is simple: **keep all progress in the database, not in memory.** Workers are disposable. Every step's result is saved the moment it finishes. To find out what a run should do next, a worker runs the workflow's code again from the top, handing it the results that are saved, and sees what it asks for. If a worker dies, nothing is lost but the step it was in the middle of, and that goes to another worker. If a step fails, only that step runs again.
 
 ---
 
-## 2. Writing a workflow (the "recipe")
+## 2. Writing a workflow
 
-You describe a workflow with `defineWorkflow` (`demo/workflows/payment/workflow.ts`):
+You describe a workflow with `defineWorkflow` (`demo/workflows/payment/workflow.ts`). Here it is with the details trimmed:
 
 ```ts
 defineWorkflow({
   name: "payment",
   version: "1",
-  steps: [
-    { name: "receive-payment", run: (ctx) => receivePayment(...) },
-    { name: "validate-account", run: (ctx) => validateAccount({
-        amountCents: ctx.outputs["receive-payment"].amountCents, ... }) },
-    { name: "score-risk", needs: ["validate-account"], leaseMs: 10_000, run: ... },
-    { name: "screen-sanctions", needs: ["validate-account"], maxAttempts: 4, backoffMs: 500, run: ... },
-    { name: "post-ledger", needs: ["score-risk", "screen-sanctions"], run: ... },
-  ],
+  async run(ctx) {
+    const payment = await ctx.step("receive-payment", () => receivePayment(ctx.input));
+    await ctx.step("validate-account", () => validateAccount(payment));
+
+    await Promise.all([
+      ctx.step("score-risk", (step) => scoreRisk(step), { leaseMs: 10_000 }),
+      ctx.step("screen-sanctions", (step) => screenSanctions(step), {
+        maxAttempts: 4,
+        backoffMs: 500,
+        timeoutMs: 6_000,
+      }),
+    ]);
+
+    return ctx.step("post-ledger", (step) => postLedger(payment, step.idempotencyKey));
+  },
 });
 ```
 
-Each step is just an async function. It gets a `ctx` (the "context"):
+It reads like ordinary code, and that's the point. `await` one step, then the next. `Promise.all` asks for two at once. An `if` chooses between them, a loop asks for as many as the input says, and `try`/`catch` deals with one that failed. The engine has no separate way to say any of that.
 
-- `ctx.input`: what the run was started with, such as `{ forceOutcome: "clear" }`;
-- `ctx.outputs`: the results of the steps it depends on, which is how step 2 knows the amount from step 1;
-- `ctx.attempt`: 1 the first time, higher if the step had to run again, after an error (section 11) or because its worker went silent (section 8);
-- `ctx.signal`: fires if this worker loses the step to another one (section 8), or if the attempt runs past its time limit (section 11);
-- `ctx.idempotencyKey`: a stable id for this step (more in section 12).
+**`ctx.step(name, fn, options)`** asks for a step and waits for its result.
 
-Whatever the function returns becomes its **output**. If it throws, the attempt **fails**, and the step is retried (section 11). To fail for good straight away, throw a **`NonRetryableError`**.
+- **`name`** identifies the step within the run. Each name is used once.
+- **`fn`** is the work. It gets a small object describing this attempt:
+  - `attempt`: 1 the first time, higher if the step had to run again, after an error (section 11) or because its worker went silent (section 8);
+  - `abortSignal`: fires when the result won't be used: the step was taken away (section 8), ran past its time limit (section 11), or its run ended without it (sections 9 and 14);
+  - `idempotencyKey`: a stable id for this step (section 12).
+- **`options`** are settings for this one step:
+  - **`leaseMs`**: how long its worker may go silent before the step is given to someone else (section 7). `score-risk` sets 10 seconds; the default is 30.
+  - **`maxAttempts`** and **`backoffMs`**: how many times it may run in all, and the first wait before a retry (section 11). `screen-sanctions` calls a flaky vendor, so it gets 4 attempts, starting half a second apart; the defaults are 3 attempts, starting 1 second apart.
+  - **`timeoutMs`**: how long one attempt may run before the worker gives up on it (section 11).
 
-**`needs`** lists the steps that must succeed before this one starts (section 10). Leave it out and a step needs the one listed before it, so a plain list still runs in order: that's why `receive-payment` and `validate-account` don't set it. A step can only need steps listed **before** it. That one rule catches typos (a name that isn't a step), a step needing itself, and loops (two steps each waiting for the other), and `defineWorkflow` throws if it's broken.
+Whatever `fn` returns becomes the step's **output**, and that is what `await ctx.step(...)` gives the workflow: `payment` above is what `receive-payment` returned. If `fn` throws, the attempt **fails**, and the step is retried (section 11). To fail for good straight away, throw a **`NonRetryableError`**.
 
-`ctx.outputs` holds every step a step depends on, directly or through others: `post-ledger` needs the two checks, but it can also read `receive-payment`'s amount, because it depends on that through them. What it never holds is a step running alongside. `score-risk` can't see `screen-sanctions`' output, because whether that exists yet would depend on which finished first.
+Whatever the workflow's function returns is the **run's output**. The workflow as a whole can also set **`concurrency`**: runs that share a key, such as payments from one account, don't overlap (section 13).
 
-A step can also set **`leaseMs`**: how long its worker may go silent before the step is given to someone else (section 7). `score-risk` sets 10 seconds; steps that don't set one get the engine's default of 30 seconds.
-
-And it can set its **retry policy** (section 11): **`maxAttempts`**, how many times it may run in all, and **`backoffMs`**, the first wait before a retry. `screen-sanctions` calls a flaky vendor, so it gets 4 attempts, starting half a second apart; steps that don't set them get 3 attempts, starting 1 second apart.
-
-And a **time limit**: **`timeoutMs`**, how long one attempt may run before the worker gives up on it (section 11). `screen-sanctions` sets 6 seconds. Steps that don't set one get the engine's `timeoutMs`.
-
-The workflow as a whole can set **`concurrency`**: runs that share a key, such as payments from one account, don't overlap (section 13).
-
-The engine knows nothing about payments. It only knows "named functions and what each one needs".
+The engine knows nothing about payments. It only knows "code that asks for named steps".
 
 ---
 
-## 3. Two kinds of tables: the recipe and the cooking
+## 3. What is saved
 
-The schema (`workflowEngine/src/stores/postgres/schema.sql`) has two groups of tables. The best analogy is a recipe versus cooking that recipe tonight:
+The schema (`workflowEngine/src/stores/postgres/schema.sql`) has six tables:
 
-|                                       | Table           | Holds                                                                                                                                                              |
-| ------------------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **The plan** (the recipe)             | `workflows`     | One row per version of a workflow                                                                                                                                  |
-|                                       | `steps`         | The steps in each version, with each step's `needs`, `lease_ms`, `max_attempts` and `backoff_ms`                                                                   |
-|                                       | `schedules`     | One row per schedule: a workflow to start, when, and with what input (section 15)                                                                                  |
-| **The execution** (tonight's cooking) | `workflow_runs` | One row each time someone starts a workflow, with its concurrency group and when it was admitted (section 13)                                                      |
-|                                       | `step_runs`     | Progress of each step in that run, with its `needs` copied from the plan: **this is the to-do list workers pick from**. A running step also has `lease_expires_at` |
-|                                       | `events`        | A diary of everything that happened, never edited                                                                                                                  |
+| Table           | Holds                                                                                                                                           |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `workflows`     | One row per version of a workflow: its name and its `version`                                                                                   |
+| `schedules`     | One row per schedule: a workflow to start, when, and with what input (section 15)                                                               |
+| `workflow_runs` | One row each time someone starts a workflow, with its input, its output once it has one, and its concurrency group (section 13)                 |
+| `step_runs`     | One row for each step a run has asked for, with its output: **this is the to-do list workers pick from**. A running step has `lease_expires_at` |
+| `events`        | A diary of everything that happened, never edited                                                                                               |
+| `outbox`        | Messages on their way to workers (section 19)                                                                                                   |
 
-On startup, the API calls `engine.sync()`, which copies each workflow's plan into `workflows` and `steps`. The orchestrator's process calls it too before it starts its loop, because it starts runs as well (section 15). If you edit a workflow, say by renaming a step or changing what it needs, its lease or its retries, it gets a **new version row**. The engine can't see inside a step's `run`, so every workflow also has a **`version`** of its own, any text you choose, and changing that makes a new version row too. Change it when you edit a step's code in a way that runs already in progress couldn't carry on with. The row keeps both: your `version`, and a `plan_hash` of the version and the steps together, which is what tells two rows apart. Every run also copies the version it started on into its own `workflow_version` column, so you can see it on the run without looking anything up. Old runs keep pointing at the version they started with, so the dashboard still shows them correctly.
+Notice what isn't there: a list of a workflow's steps. A workflow is code, and nothing knows which steps it will ask for until it runs. A run's steps appear in `step_runs` one by one, as its code asks for them.
 
-**Workers only claim runs of a version they have.** During a deploy, old and new workers run side by side. Without this, an old worker could pick up a step of a run started on the new version, and run it with old code against a new plan. Each worker knows the versions of its own workflows, and the claim query (section 6) only matches those, so old workers finish old runs and new workers take new ones.
+**A run belongs to a version.** On startup, the API calls `engine.sync()`, which saves each workflow's name and `version`. The orchestrator's process calls it too before it starts its loop, because it starts runs as well (section 15). Every run points at the version it started on, and copies it into its own `workflow_version` column, so you can see it on the run without looking anything up.
+
+**Workers only work on runs of a version they have.** During a deploy, old and new workers run side by side. Without this, an old worker could pick up a run started by new code, and run old code against results the new code saved. Each worker knows the versions of its own workflows and only touches runs of those, so old workers finish old runs and new workers take new ones.
+
+**`version` is yours to change.** The engine can't see inside your code, so it can't tell when you've edited it. `version` is any text you choose, and changing it is the only thing that makes a new version. Change it when you edit a workflow in a way that runs already in progress couldn't carry on with: a step renamed, removed, or asked for in a different order. Leave it alone for a fix those runs should pick up.
 
 ---
 
-## 4. Starting a run
+## 4. Starting a run, and running the workflow's code
 
 Something calls `startRun`, for example when you press **Start run** in the dashboard. In **one database transaction**, the store:
 
-1. inserts a `workflow_runs` row with status **`queued`**;
-2. inserts one `step_runs` row per step:
-   - steps that need nothing are **`ready`** (claimable now); in the payment workflow that's only `receive-payment`, but a workflow can have several starting steps;
-   - the others are **`pending`** (waiting for what they need);
-3. writes events: `run_queued`, and `step_ready` for each ready step.
+1. inserts a `workflow_runs` row with status **`queued`**, marked as needing its code run (`advance_at`);
+2. writes a `run_queued` event, and a message telling workers there is something to do (section 19).
 
 ```
-workflow_runs:  [run A: queued]
-step_runs:      receive-payment: READY
-                validate-account: pending
-                score-risk:       pending
-                ...
+workflow_runs:  [run A: queued, needs advancing]
+step_runs:      (nothing yet)
 ```
 
-Nobody has run anything yet. The run is just waiting in the database.
+The run has no steps, because its code hasn't run. The process that called `startRun` never runs your workflow; a worker does.
 
-**Why one transaction?** Either all of it is saved or none of it is. You can never end up with a run that has no steps, or steps with no run.
+**Advancing a run.** A worker picks up the marked run and runs its workflow function. The function gets as far as its first `ctx.step("receive-payment", ...)`. Nothing is saved for that step, so two things happen: the engine notes that the workflow asked for it, and the `await` doesn't finish. The function is stuck there, and that's fine. The worker's answer to "what does this run do next?" is **"it's waiting for `receive-payment`"**. So the store inserts a `step_runs` row for it, **`ready`** to be claimed, and the run becomes **`running`**.
 
-A run in a concurrency group whose group is full starts differently: every step is `pending`, and the run waits for a slot (section 13).
+That is the whole mechanism, and everything else builds on it. Each time something happens in a run, a worker runs the function **again from the top**, with whatever is saved by then:
+
+```
+nothing saved            → asks for receive-payment                    → make it ready
+receive-payment saved    → gets its output, asks for validate-account  → make it ready
+both saved               → asks for score-risk and screen-sanctions    → make both ready
+...
+all five saved           → the function returns                        → the run succeeded
+```
+
+A step whose result is saved **hands it back at once and doesn't run again**. So although the function starts from the top every time, it goes straight through the steps that are done, in a few microseconds, to the first thing it doesn't have. Running a workflow this way is called **replaying** it.
+
+**How does the engine know the function is stuck?** Saved results are handed back as promises that have already finished, so the function moves through them without ever giving up its turn. The engine starts the function, lets the event loop turn once, and looks: by then the function has either finished, or it is waiting on a step with no result. It can't be anywhere else.
+
+**The rules this puts on a workflow.** Replaying only works if the function does the same thing every time it is given the same results:
+
+1. **Only `await` what `ctx` gives you.** A function waiting on its own timer or request looks stuck on nothing, and the run fails.
+2. **Anything that can differ between two runs goes inside a step:** the clock, random numbers, a call to a service. A step's result is saved, so the function sees the same value every time.
+3. **A step name is used once in a run.** In a loop, put the counter in the name.
+4. **Change `version` when you change the path** (section 3).
+
+Where the engine can tell a rule was broken, it fails the run and says so. If the function doesn't ask again for a step the run has saved, it has taken a different path from last time, and the run fails as **`nondeterministic`**. It never quietly carries on down the new path.
+
+**Why one transaction, every time?** Either all of a change is saved or none of it is. You can never end up with a step that is ready but not recorded as asked for, or a run marked finished with a step still claimable.
+
+A run in a concurrency group whose group is full isn't marked at all: its code doesn't run until it has a slot (section 13).
 
 ---
 
 ## 5. Workers: the loop that does the work
 
-A worker (`workflowEngine.worker.ts`) is a loop that runs forever:
+A worker (`workflowEngine.worker.ts`) is a loop that runs forever, with two jobs:
 
 ```
 loop:
-  claim a ready step from the database (it comes with a lease)
-  if there was one → run it, renewing the lease every so often, save the result
-  if not           → wait to be told a step is ready, then try again
+  is there a run marked as needing its code run?
+    → run the workflow's function, save what it asked for        (advance, section 4)
+  else, is there a ready step?
+    → claim it (it comes with a lease), run it, save the result  (sections 6 to 9)
+  else
+    → wait to be told there is work, then look again
 ```
 
-Who tells it is the **message broker** (section 19). The simplest one is a timer that says "look again" every 250ms, which is called **polling**. The demo uses one that speaks up only when there is something to find.
+**Running a step means finding its code first.** A step's work is the function written inline in `ctx.step("score-risk", (step) => ...)`. It only exists while the workflow is running, and it uses values from earlier steps. So a worker that claims `score-risk` replays the workflow, with the results saved when it claimed, until the function asks for `score-risk`, and takes the function given there. Then it runs that, and only that. If the workflow never asks for the step, the code has changed under the run, and the step fails with `unknown_step`.
+
+Who tells a waiting worker there is work is the **message broker** (section 19). The simplest one is a timer that says "look again" every 250ms, which is called **polling**. The demo uses one that speaks up only when there is something to find.
 
 `pnpm dev` starts **3 workers**, each a separate process, plus **1 orchestrator** (section 8). They never talk to each other. The database is the only thing they share.
 
@@ -205,7 +236,7 @@ Nobody had to notice the crash. The silence was enough.
 18s   worker-3 finishes and tries to save its result → rejected
 ```
 
-Why rejected? Saving a result uses the same ownership check as a heartbeat: the step must be `running`, for this worker, on this attempt. By then it's on attempt 2, so worker-3's write matches nothing. Its next heartbeat fails too, which fires `ctx.signal`, the step's cue to stop early if it can. JavaScript can't force a function to stop, so the signal is only a request; the rejected write is the guarantee.
+Why rejected? Saving a result uses the same ownership check as a heartbeat: the step must be `running`, for this worker, on this attempt. By then it's on attempt 2, so worker-3's write matches nothing. Its next heartbeat fails too, which fires the step's `abortSignal`, its cue to stop early if it can. JavaScript can't force a function to stop, so the signal is only a request; the rejected write is the guarantee.
 
 That's why `score-risk` sets `leaseMs: 10_000`: a normal risk check blocks for 3 to 4.5 seconds, so 10 seconds leaves room for that while still recovering a stuck one quickly.
 
@@ -213,23 +244,47 @@ That's why `score-risk` sets `leaseMs: 10_000`: a normal risk check blocks for 3
 
 ## 9. Finishing a step
 
-The worker calls the step's `run` function, renewing its lease while it runs. Then one of two things happens.
+The worker calls the step's function, renewing its lease while it runs. Then one of two things happens.
 
 **✅ It returned a value:** `completeStep`, in one transaction:
 
 1. locks the run's row (section 10 explains why);
 2. checks that this worker still owns the step (same worker, same attempt), and rejects the result if not;
 3. saves the output, marks the step **`succeeded`** and clears its lease;
-4. marks **`ready`** every step that needs this one and whose other needs have all succeeded too;
-5. or, if every step has now succeeded, marks the run **`succeeded`**;
-6. writes events (`step_succeeded`, `step_ready`, …).
+4. **advances the run** (section 4): runs the workflow's function again, which now gets this step's output, and acts on what it does next;
+5. writes events (`step_succeeded`, `step_ready`, …).
 
-**❌ It threw an error:** `failStep`, in one transaction, with the same run lock and ownership check. If the error can be retried and the step has attempts left, it's scheduled to run again (section 11). Otherwise it fails for good:
+Step 4 has three possible outcomes:
+
+- the function asks for more steps → each becomes **`ready`**;
+- the function is still waiting on a step that hasn't finished → nothing to do;
+- the function returns → the run is **`succeeded`**, with what it returned as its output.
+
+The worker that finished the step does the advancing itself, in the same transaction. It has the workflow's code, and it already holds the run. So a run doesn't wait for anyone between one step and the next.
+
+**❌ It threw an error:** `failStep`, in one transaction, with the same run lock and ownership check. If the error can be retried and the step has attempts left, it's scheduled to run again (section 11), and the workflow isn't told: as far as it knows, the step is still going. Otherwise the step fails for good:
 
 1. saves the error message and marks the step **`failed`**, with a **failure reason** (section 11);
-2. marks **`skipped`** every step that depends on it, directly or through others, because none of them can ever run;
-3. leaves every other step alone: steps already running finish, and steps whose needs are met still start;
-4. once nothing in the run can move any more, marks the run **`failed`**, with the reason of the step that failed first.
+2. advances the run. This time, where the workflow is waiting for the step, the `await` **throws** a `StepFailedError`, carrying the step's name, reason and message.
+
+What happens next is up to the workflow, as with any thrown error:
+
+- **It doesn't catch it.** The function throws, so the run is **`failed`**, with the reason of the step that failed.
+- **It catches it.** The function carries on. It might ask for a step that undoes earlier work, try something else, or return a result that says what happened. The run hasn't failed.
+
+```ts
+try {
+  await ctx.step("book-hotel", bookHotel);
+} catch (err) {
+  await ctx.step("cancel-flight", cancelFlight); // undo what was done before
+  return { booked: false };
+}
+```
+
+**A run lasts exactly as long as its function.** The moment the function returns or throws, the run is over, and nothing is left running behind it:
+
+- a step it asked for that hasn't started becomes **`skipped`**;
+- a step that is still running is marked **`failed`** with the reason `cancelled`; its worker is told (section 19), and whatever it returns later is rejected.
 
 Here's a payment run where the sanctions check finds a match:
 
@@ -237,44 +292,47 @@ Here's a payment run where the sanctions check finds a match:
 receive-payment   ✅ succeeded
 validate-account  ✅ succeeded
 screen-sanctions  ❌ failed: "Sanctions list match"     at 2s
-post-ledger       – skipped (needs screen-sanctions)    at 2s
-score-risk        ✅ succeeded, still running alongside at 3.5s → the run fails now
+                  → the Promise.all throws, nothing catches it, the run fails   at 2s
+score-risk        ❌ failed: stopped, it was still running                      at 2s
+post-ledger       never asked for
 ```
 
 A sanctions match is a decision, not a glitch: asking again gives the same answer. So the step throws a `NonRetryableError` and doesn't retry.
 
-**Why let `score-risk` finish?** Runs only move forward: a run does all the work it still can. `post-ledger` needs sanctions, so it can never run, and it's skipped straight away. `score-risk` doesn't need sanctions, so by the workflow's own description it's still valid work, and stopping it would throw that work away. If a step mustn't happen when another fails, it should `need` that step. Finishing what can be finished also pays off with redrive (section 11): steps that succeeded are never run again, so the more that succeeded, the less a resume has to redo. The cost is a slower answer: the run says `failed` only when the last running step ends.
+**Why stop `score-risk`?** Because nothing will ever read its result. The function has thrown; there is no line of code left to hand the risk score to. Letting it finish would be work, and possibly side effects, on behalf of a run that has already failed, and the caller would hear "failed" later for it. A workflow that wants the other check to finish says so, by catching the failure. `post-ledger` isn't skipped, either: it was never asked for, so there is no row for it at all.
 
 **Why does every change write an event in the same transaction?** The `events` table is the run's diary, which is the event list on the run page. Because the diary entry and the state change are saved together, the diary can never disagree with the current state.
 
 ---
 
-## 10. Steps side by side, and the join
+## 10. Steps side by side, and the step after both
 
-When `validate-account` finishes, two steps need only it: `score-risk` and `screen-sanctions`. Both become `ready` in the same transaction, and two workers claim them, one each. The run now has two steps running at once.
+When `validate-account` finishes and the run is advanced, the workflow reaches `Promise.all` and asks for `score-risk` and `screen-sanctions` in the same breath. Both become `ready` in the same transaction, and two workers claim them, one each. The run now has two steps running at once.
 
-**The join is the hard part.** `post-ledger` needs both checks. Suppose they finish at the same moment, on two workers, and each runs `completeStep`:
-
-```
-worker-1: score-risk done.        Is screen-sanctions done? No, still running.  → do nothing
-worker-2: screen-sanctions done.  Is score-risk done?       No, still running.  → do nothing
-```
-
-Both are telling the truth. Each transaction can't see the other's change until it commits, so each sees the other step as still running. Neither readies `post-ledger`, and the run is **stuck forever**, with every step either finished or waiting.
-
-**The fix: one at a time, per run.** Every transaction that changes a started run's steps first locks that run's row in `workflow_runs` (`SELECT … FOR UPDATE`). Two steps of the same run finishing at once now take turns:
+**The step after both is the hard part.** The workflow asks for `post-ledger` only once both checks are saved. Suppose they finish at the same moment, on two workers, and each one saves its result and advances the run:
 
 ```
-worker-1: lock run A. score-risk done. screen-sanctions? running. → nothing. Commit, unlock.
+worker-1: score-risk done.        Replay: screen-sanctions has no result.  → still waiting
+worker-2: screen-sanctions done.  Replay: score-risk has no result.        → still waiting
+```
+
+Both are telling the truth. Each transaction can't see the other's change until it commits, so each replays the workflow without the other's result. Neither one's replay gets past the `Promise.all`, nobody asks for `post-ledger`, and the run is **stuck forever**, with every step finished.
+
+**The fix: one at a time, per run.** A run is only ever advanced with its row in `workflow_runs` locked, and every transaction that changes a run's steps takes that lock first. Two steps of the same run finishing at once now take turns:
+
+```
+worker-1: lock run A. score-risk done. Replay: no result for screen-sanctions. → nothing. Commit, unlock.
 worker-2: (waits for the lock) lock run A. screen-sanctions done.
-          score-risk? succeeded (worker-1 committed). → post-ledger is ready.
+          Replay: both saved (worker-1 committed). → the workflow asks for post-ledger.
 ```
 
-Whoever goes second sees the first one's work, so the step that needs both is readied **exactly once**. The lock only covers one run, so different runs never wait for each other, and it lasts milliseconds.
+Whoever goes second replays with both results, so the step after both is asked for **exactly once**. The lock only covers one run, so different runs never wait for each other, and it lasts milliseconds: a replay runs no steps and makes no calls, it only walks through saved results.
 
-The same lock covers the other run-wide decision: "nothing can move any more, so the run is finished". Two branches ending at the same moment would otherwise each see the other still running, and the run would never be marked done. It also has to be taken in the same order everywhere, the run first and then its steps (with a concurrency group's lock in between, section 13), or two transactions could each hold the lock the other wants and wait forever (a **deadlock**). That's why the orchestrator's sweep locks the run before the expired step, too. (The one exception is claiming a run's very first step, which marks the run `running` while already holding the step. That claim never waits for the run's lock; section 14 explains why it mustn't.)
+The lock has to be taken in the same order everywhere, the run first and then its steps (with a concurrency group's lock in between, section 13), or two transactions could each hold the lock the other wants and wait forever (a **deadlock**). That's why the orchestrator's sweep locks the run before the expired step, too. The one thing that takes a step before its run is a claim, and section 14 explains how that is kept from deadlocking.
 
-**Sticky claiming with branches:** when a worker's step readies two steps at once, the worker keeps the first and leaves the other for someone else (section 16).
+**What a step came after.** When the workflow first asks for a step, the engine works out which earlier steps it needed first, and saves that with the step (`asked_after`). It does this by trying: it replays the workflow once more with an earlier step's result taken away, and if the new step is no longer asked for, the new step needed that one. It decides nothing; it is what lets the dashboard draw a run as a diagram, with an arrow from each step to the ones that came straight after it. The diagram grows as the run goes, since a step isn't known until the workflow asks for it.
+
+**Sticky claiming with steps side by side:** when the step a worker finishes leads to two more, the worker keeps the first and leaves the other for someone else (section 16).
 
 ---
 
@@ -282,7 +340,7 @@ The same lock covers the other run-wide decision: "nothing can move any more, so
 
 Most failures in real systems are temporary: a timeout, a dropped connection, a service restarting. Giving up on the whole payment because a vendor was slow for a second would be silly. So when a step throws, the engine **runs that step again**, and only that step.
 
-**Only the failed step runs again, never the whole workflow.** Every finished step is a checkpoint: its output is saved, and later steps read it from `ctx.outputs`. Retrying the failed step is resuming from the last checkpoint. Starting the run over would redo steps that already worked, side effects and all.
+**Only the failed step runs again, never the steps before it.** Every finished step is a checkpoint: its output is saved, and the workflow is handed it each time it is replayed (section 4). Retrying the failed step is resuming from the last checkpoint. Starting the run over would redo steps that already worked, side effects and all.
 
 **A retry waits first.** Hammering a struggling service makes it worse, so each retry waits longer than the last (**exponential backoff**): `backoffMs`, then double, then double again, up to `maxBackoffMs` (30 seconds). Each wait is also nudged by up to 20% either way (**jitter**), so a hundred steps that failed at the same moment don't all retry at the same moment too.
 
@@ -302,31 +360,35 @@ While it waits, the step is `ready` with `ready_at` in the future, so no worker 
 
 **A step can be stuck without failing.** Everything above starts with a step that throws. A vendor that never answers doesn't throw: the step just waits. Its worker is fine, so heartbeats keep going and the lease keeps renewing (section 7). A lease only proves the **worker** is alive, not that the **step** is getting anywhere. Left alone, the step would run forever, and in a concurrency group it would keep its run's slot forever too (section 13).
 
-So every attempt has a limit, **`timeoutMs`**. A step can set its own; the rest get the engine's `timeoutMs` setting, the one setting with no default, so an engine can't be created without choosing it. When the limit passes, the worker fires `ctx.signal`, stops waiting for the step, and records the attempt as failed with the error `Timed out after 6000ms`. From there it's an ordinary failed attempt: it waits out its backoff and runs again, and it counts towards `maxAttempts`. Here is a sanctions check whose vendor doesn't answer the first time:
+So every attempt has a limit, **`timeoutMs`**. A step can set its own; the rest get the engine's `timeoutMs` setting, the one setting with no default, so an engine can't be created without choosing it. When the limit passes, the worker fires the step's `abortSignal`, stops waiting for the step, and records the attempt as failed with the error `Timed out after 6000ms`. From there it's an ordinary failed attempt: it waits out its backoff and runs again, and it counts towards `maxAttempts`. Here is a sanctions check whose vendor doesn't answer the first time:
 
 ```
 0.0s   attempt 1 claimed     the vendor never answers
-6.0s   the time limit passes → ctx.signal fires, step_retry_scheduled ("Timed out after 6000ms")
+6.0s   the time limit passes → abortSignal fires, step_retry_scheduled ("Timed out after 6000ms")
 6.5s   attempt 2 claimed     the vendor answers → step_succeeded
 ```
 
 The worker enforces the limit with a timer of its own; the orchestrator isn't involved and nothing about it is stored. That leaves two cases a timer in the worker can't catch, and the lease already covers both: a worker that died has no timers, and a worker whose event loop is blocked can't run them, but neither can send heartbeats either (section 8).
 
-As with a lost lease, the signal is only a request. If the step's function ignores it, it carries on in the background, and whatever it returns or throws later is thrown away. Its retry may then run while it's still going, which is one more reason for steps with side effects to be safe to repeat (section 12). The limit isn't part of the workflow's version (section 3), so changing it doesn't strand any runs.
+As with a lost lease, the signal is only a request. If the step's function ignores it, it carries on in the background, and whatever it returns or throws later is thrown away. Its retry may then run while it's still going, which is one more reason for steps with side effects to be safe to repeat (section 12). Changing the limit doesn't make a new version of the workflow (section 3), so it doesn't strand any runs.
 
 **A failure says why.** Every failure is final, so the status is just `failed`. The `failure_reason` column on the step and the run says why, and that tells you what to do about it:
 
-| `failure_reason`     | What happened                                          | What to do                                                   |
-| -------------------- | ------------------------------------------------------ | ------------------------------------------------------------ |
-| `non_retryable`      | The step threw a `NonRetryableError`                   | Nothing to fix: it was a decision                            |
-| `attempts_exhausted` | It kept throwing until it ran out of attempts          | Fix the cause (a vendor outage, a bug), then start a new run |
-| `lost_worker`        | It kept losing its worker until it ran out of attempts | Find what kills or stalls the worker                         |
-| `unknown_step`       | No worker had code for the step                        | Deploy workers that have it                                  |
-| `cancelled`          | The step was running when its run was cancelled        | Nothing: see section 14                                      |
+| `failure_reason`     | What happened                                                               | What to do                                                  |
+| -------------------- | --------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `non_retryable`      | A step, or the workflow itself, threw a `NonRetryableError`                 | Nothing to fix: it was a decision                           |
+| `attempts_exhausted` | A step kept throwing until it ran out of attempts                           | Fix the cause (a vendor outage, a bug), then resume the run |
+| `lost_worker`        | A step kept losing its worker until it ran out of attempts                  | Find what kills or stalls the worker                        |
+| `unknown_step`       | The workflow never asked for the step when a worker went to run it          | The code changed under the run: see `nondeterministic`      |
+| `cancelled`          | The step was running when its run was cancelled, or ended without it        | Nothing: see sections 9 and 14                              |
+| `workflow_error`     | The workflow's own code threw, used a step name twice, or gave bad settings | Fix the code, then resume the run                           |
+| `nondeterministic`   | The workflow took a different path from the one its saved steps record      | Give the changed code a new `version`, or undo the change   |
+
+A step's reason is one of the first five. A run takes the reason of the step whose failure it didn't catch, or one of the last two.
 
 The dashboard shows the reason next to the Failed badge.
 
-**Resuming a failed run (redrive).** Once you've fixed the cause, you don't have to start again from the beginning. `redriveRun` (the **Resume run** button on the run page) puts the run back to `running`: every step that didn't succeed goes back to `pending`, those whose needs have already succeeded become `ready`, and steps that succeeded keep their outputs and never run again. It's offered for every reason except `non_retryable`, where asking again won't change a decision, and for a run that was cancelled (section 14).
+**Resuming a failed run (redrive).** Once you've fixed the cause, you don't have to start again from the beginning. `redriveRun` (the **Resume run** button on the run page) puts the run back to `running` and marks it to be advanced. Steps that succeeded keep their outputs and never run again. Every other step goes back to **`pending`**, which means "to be run again when the workflow asks for it". Then the workflow is replayed as usual: it goes straight through what succeeded, and asks again for the step that failed. It's offered for every reason except `non_retryable`, where asking again won't change a decision, and for a run that was cancelled (section 14).
 
 The resumed steps get **fresh attempts**, but their attempt numbers keep counting up: attempt 5, not attempt 1. The ownership check (section 8) matches on the attempt number, so if it started again from 1, a worker that lost its lease before the run failed, and is somehow still running, could match a new attempt and save a stale result. Instead, `prior_attempts` remembers where the redrive happened, and `maxAttempts` counts only the attempts after it.
 
@@ -339,7 +401,7 @@ Leases and retries both mean a step can run **more than once**: in the freeze ex
 "Idempotent" means "doing it twice has the same effect as doing it once". There are two kinds of keys:
 
 - **Run key (chosen by the caller):** start a run with `idempotency_key: "order-123"` twice, and the second call starts nothing and returns the first run's id. This protects against a double click or a retried HTTP request.
-- **Step key (provided by the engine):** `ctx.idempotencyKey` is always `runId:stepName`, the same on every attempt. A step passes it to outside services, such as a payment provider, so if the step ever runs again, the provider can say "I've already seen this one" instead of charging twice.
+- **Step key (provided by the engine):** a step's `idempotencyKey` is always `runId:stepName`, the same on every attempt. A step passes it to outside services, such as a payment provider, so if the step ever runs again, the provider can say "I've already seen this one" instead of charging twice.
 
 In the freeze example, running `score-risk` twice was harmless because it only calculates. `post-ledger` is different: it writes money movements.
 
@@ -384,17 +446,17 @@ defineWorkflow({
 });
 ```
 
-The **key** is worked out from the run's input when it starts. Runs with the same key form a **group**, and at most **`limit`** runs of a group are in progress at once; the rest wait. Payments from different accounts have different keys, so they never wait for each other. A key of `null` means the run is in no group at all, which is why demo payments without an `account` aren't limited. The limit isn't part of the workflow's version (section 3), so changing it doesn't strand anything.
+The **key** is worked out from the run's input when it starts. Runs with the same key form a **group**, and at most **`limit`** runs of a group are in progress at once; the rest wait. Payments from different accounts have different keys, so they never wait for each other. A key of `null` means the run is in no group at all, which is why demo payments without an `account` aren't limited. Changing the limit doesn't make a new version of the workflow (section 3), so it doesn't strand anything.
 
 **Waiting and admission.** A run is **in progress** from when it's **admitted** (given a slot) until it finishes, whether it succeeded, failed or was cancelled. `workflow_runs` records three things for this: the run's `concurrency_key`, its `concurrency_limit`, and `admitted_at`.
 
-- **Starting a run:** if its group has a free slot, it's admitted at once and starts like any other run, with an extra `run_admitted` event. If the group is full, it's saved with **every step `pending`** and no `admitted_at`, and writes `run_waiting`. It stays `queued`.
-- **While it waits:** it has no `ready` step, so no worker can claim anything from it. The claim query (section 6) didn't change at all.
-- **When a run in the group finishes:** in the same transaction, its slot goes to the **oldest waiting run**, which gets `admitted_at`, writes `run_admitted`, and has its first steps readied.
+- **Starting a run:** if its group has a free slot, it's admitted at once and starts like any other run, with an extra `run_admitted` event. If the group is full, it's saved with no `admitted_at` and **isn't marked to be advanced**, and writes `run_waiting`. It stays `queued`.
+- **While it waits:** its code hasn't run, so it has no steps, and no worker has anything to do for it. The claim query (section 6) didn't change at all.
+- **When a run in the group finishes:** in the same transaction, its slot goes to the **oldest waiting run**, which gets `admitted_at`, writes `run_admitted`, and is marked to be advanced, so a worker runs its code and it asks for its first step.
 
 ```
-0s     A starts   group "account:acct_shared" has a free slot → admitted, receive-payment ready
-0.2s   B starts   the group is full                          → run_waiting, every step pending
+0s     A starts   group "account:acct_shared" has a free slot → admitted, marked to be advanced
+0.2s   B starts   the group is full                          → run_waiting, no steps yet
 0.4s   C starts   the group is full                          → run_waiting
 8s     A finishes                                            → B admitted (the oldest waiting)
 16s    B finishes                                            → C admitted
@@ -420,7 +482,7 @@ It fits into the lock order from section 10: **run, then group, then steps.** Fi
 
 Sometimes you want a run to stop: it was started by mistake, or it's stuck and holding its group's slot (section 13). `cancelRun` (the **Cancel run** button on the run page) stops any run that hasn't finished, in one transaction:
 
-- steps that haven't started, `pending` or `ready`, become `skipped`;
+- a step that hasn't started becomes `skipped`;
 - a step that's `running` becomes `failed`, with the reason `cancelled`;
 - the run becomes **`cancelled`**, and its slot goes to the next waiting run.
 
@@ -429,30 +491,29 @@ receive-payment   ✅ succeeded
 validate-account  ✅ succeeded
 score-risk        ❌ failed: "Run cancelled"   (it was running)
 screen-sanctions  ❌ failed: "Run cancelled"   (it was running)
-post-ledger       – skipped
+post-ledger       never asked for
 run               cancelled
 ```
+
+It is the same thing that happens to a run's unfinished steps when its workflow ends without them (section 9), and the same code does it.
 
 **Cancelled is its own status, not a kind of failure.** Nothing went wrong: someone decided. If a cancelled run were `failed`, it would sit in the Failed tab and be counted with the failures, and anyone watching for failures would be alerted by every run a colleague stopped on purpose. So a run can end three ways, `succeeded`, `failed` or `cancelled`, and the dashboard has a tab and a count for each. A cancelled run has no `failure_reason`; only the steps that were cut off do.
 
 Steps have no `cancelled` status. A step that was running when its run was cancelled really didn't finish, so it's `failed`, and its reason, `cancelled`, says it wasn't the step's fault.
 
-A cancelled run can be resumed like a failed one: **Resume run** puts back the steps that didn't succeed, cut off or skipped, and the run carries on from there.
+A cancelled run can be resumed like a failed one: **Resume run** puts back the steps that didn't succeed, cut off or skipped, and the workflow carries on from there.
 
-**How does the worker find out?** The cancelled step is no longer `running`, so the worker's next heartbeat finds nothing to renew (section 7). That is exactly what a lost lease looks like: `ctx.signal` fires, and if the step finishes anyway, its result matches nothing and is rejected (section 8). The run is over the moment you cancel. Left to its heartbeats, the worker hears within a third of the step's lease; a `run_cancelled` message makes it send one straight away (section 19).
+**How does the worker find out?** The cancelled step is no longer `running`, so the worker's next heartbeat finds nothing to renew (section 7). That is exactly what a lost lease looks like: the step's `abortSignal` fires, and if the step finishes anyway, its result matches nothing and is rejected (section 8). The run is over the moment you cancel. Left to its heartbeats, the worker hears within a third of the step's lease; a `run_cancelled` message makes it send one straight away (section 19).
 
-**Cancelling has a deadlock to avoid.** Everything that changes a run's steps locks the run first (section 10), and so does a cancel. But a cancel is the first thing that locks a run **before it has started**, and a run's first claim takes its locks the other way round, the step and then the run:
+**Stopping steps has a deadlock to avoid.** Everything that changes a run's steps locks the run first (section 10), and so does a cancel, and so does the advance that ends a run. But a claim takes its locks the other way round: it locks the step it is claiming, and then writes a `step_claimed` event, and an event row points at its run. Postgres briefly locks the run for that, to make sure it isn't deleted meanwhile:
 
 ```
-worker:  claim receive-payment          holds the step, now needs the run
-cancel:  lock the run                   holds the run, now needs the step
+worker:  claim score-risk               holds the step, now needs the run (for its event)
+cancel:  lock the run                   holds the run, now needs the step (to stop it)
          → each waits for the other
 ```
 
-The worker needs the run for two things, and each got its own fix:
-
-- **Marking the run `running`.** The claim only does that if the run's row is free (`SKIP LOCKED`, the trick from section 6). If a cancel holds it, the run is about to be over anyway.
-- **Writing its events.** An event row points at its run, and Postgres briefly locks the run to make sure it isn't deleted meanwhile. A cancel therefore takes a slightly weaker lock on the run, `FOR NO KEY UPDATE`: it still makes every other change to the run's steps wait, but it lets rows that merely point at the run through.
+So the run's lock is a slightly weaker one than the usual, `FOR NO KEY UPDATE` instead of `FOR UPDATE`. It still makes everything that changes the run's steps take turns, but it lets rows that merely point at the run through, so the claim never has to wait for the run.
 
 The cancel then waits for the worker's claim to commit, and fails the step it just claimed. It can do that because it changes all the steps in **one statement** that decides row by row. Two statements, "skip what hasn't started" and then "fail what's running", could miss a step claimed between them, and leave it running in a finished run.
 
@@ -607,13 +668,15 @@ interface WorkflowStore {
   redriveRun(...)     cancelRun(...)
   createSchedule(...) updateSchedule(...) deleteSchedule(...)
   setSchedulePaused(...)                  fireDueSchedules(...)
-  relayMessages(...)  close()
+  advanceRun(...)     relayMessages(...)  close()
 }
 ```
 
-`createPostgresStore()` is one implementation of it. You could write a file-based or SQLite store with the same sixteen methods, and the engine and workers wouldn't change.
+`createPostgresStore()` is one implementation of it. You could write a file-based or SQLite store with the same seventeen methods, and the engine and workers wouldn't change.
 
-`failStep` decides between a retry and a final failure in one transaction, using the step's retry policy from the plan. The run lock (section 10) and the group lock (section 13) are the store's business too: the interface only promises that two steps finishing at once ready a step that needs both exactly once, and that a group never has more than its limit in progress, and each store keeps those promises its own way. Leases are part of the same interface on purpose: the ownership check has to happen in the same transaction that saves a step's result, so leases must live wherever step state lives.
+`failStep` decides between a retry and a final failure in one transaction, using the settings the step was asked for with. The run lock (section 10) and the group lock (section 13) are the store's business too: the interface only promises that a run is advanced by one process at a time, so that two steps finishing at once are seen one after the other, and that a group never has more than its limit in progress, and each store keeps those promises its own way.
+
+**The store has rows, not your code.** It can't run a workflow, so the methods that advance a run (`advanceRun`, `completeStep`, `failStep`) are handed a function by the engine that does: given what a run has saved, it replays the workflow and returns what it did. The store calls it with the run locked and acts on the answer. `fireDueSchedules` is handed a function the same way (section 15). Leases are part of the same interface on purpose: the ownership check has to happen in the same transaction that saves a step's result, so leases must live wherever step state lives.
 
 ---
 
@@ -629,7 +692,7 @@ An idle worker waits to be told there's work (section 5). The simplest way to te
 store ──(same transaction)──▶ outbox ──(orchestrator's relay)──▶ message broker ──▶ workers
 ```
 
-1. **The store writes the message to the `outbox` table** in the same transaction as the change it's about: a `step_ready` whenever a step becomes claimable, a `run_cancelled` when a run with a running step is cancelled. The message exists exactly when the change committed. Sending it straight to the broker instead would leave a gap: a process that died between the commit and the send would lose the message.
+1. **The store writes the message to the `outbox` table** in the same transaction as the change it's about: a `step_ready` whenever there is something for a worker to do (a step to claim, or a run to advance), a `run_cancelled` when a run with a running step is cancelled. The message exists exactly when the change committed. Sending it straight to the broker instead would leave a gap: a process that died between the commit and the send would lose the message.
 2. **The orchestrator relays.** Every 100ms (`relayIntervalMs`) it takes the waiting rows, publishes them to the broker and deletes them, in one transaction. If the publish fails, nothing is deleted and the next round tries again. If the delete fails after a publish, the message goes out twice. That is **at least once**, the same promise steps get (section 8).
 3. **Workers subscribe** to the broker. They never publish.
 
@@ -656,8 +719,8 @@ Another broker can take their place without the store, the relay or the workers 
  Dashboard ──HTTP──▶ API ──startRun──▶ ┌────────────────────── Postgres ─────────────────────┐
     ▲                 │                │ schedules  workflow_runs  step_runs  events  outbox │
     └─────reads───────┘                └─────────────────────────────────────────────────────┘
-                                          ▲  claim / heartbeat /     ▲ sweep expired leases,
-                                          │  complete / fail         │ start scheduled runs,
+                                          ▲  advance / claim /       ▲ sweep expired leases,
+                                          │  heartbeat / complete    │ start scheduled runs,
                                ┌──────────┼──────────┐               │ relay the outbox
                            worker-1   worker-2   worker-3      orchestrator
                                ▲          ▲          ▲               │
@@ -665,7 +728,7 @@ Another broker can take their place without the store, the relay or the workers 
 ```
 
 1. The **API** starts runs (through the engine, which admits them or makes them wait) and reads tables for the dashboard.
-2. **Workers** claim ready steps of versions they have, run your functions while sending heartbeats, save the results, and ready the steps that were waiting on them.
+2. **Workers** run your code, for runs of versions they have: the workflow's function, to see what it asks for next, and the steps it asks for, sending heartbeats while a step runs and saving its result.
 3. The **orchestrator** gives steps whose worker went silent to another worker, starts a run each time a schedule is due, and relays the messages that tell workers there is work.
 4. **Postgres** holds everything, so any process can die and restart without losing progress.
 
@@ -674,9 +737,11 @@ Another broker can take their place without the store, the relay or the workers 
 ## What it doesn't handle yet
 
 - **A retry repeats whatever the failed attempt already did,** unless the step makes it safe to repeat (section 12). The engine can't do that for you.
-- **The engine can't tell when a step's code changes.** If you edit the code inside `run` and leave the workflow's `version` as it was, old and new workers both claim the same runs.
-- **A timed-out step isn't stopped.** The worker stops waiting for it, but unless the step honours `ctx.signal` its function keeps running in the background, and may overlap with its own retry.
-- **A cancelled step isn't stopped either.** Its worker hears within moments when a message reaches it, and otherwise at its next heartbeat, but the step's function only stops if it honours `ctx.signal`.
+- **The engine can't tell when a workflow's code changes.** If you edit it and leave its `version` as it was, old and new workers both work on the same runs (section 3).
+- **A workflow has rules to keep** (section 4), and the engine can only catch some of the ways to break them. `Promise.race` over steps is one it doesn't support: which step wins isn't saved.
+- **A run's later steps aren't known until it asks for them,** so a run can show what it has done, not what it will do.
+- **A timed-out step isn't stopped.** The worker stops waiting for it, but unless the step honours its `abortSignal` its function keeps running in the background, and may overlap with its own retry.
+- **A stopped step isn't stopped either.** Its worker hears within moments when a message reaches it, and otherwise at its next heartbeat, but the step's function only stops if it honours its `abortSignal`.
 - **Every idle worker wakes for one ready step.** A `step_ready` message goes to all of them, one wins the claim, and the rest find nothing.
 
-All five are listed in `workflowEngine/guarantees.md`.
+All seven are listed in `workflowEngine/guarantees.md`.
