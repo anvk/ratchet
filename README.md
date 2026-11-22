@@ -53,10 +53,10 @@ running; none of it is needed to use the engine.
 
 ### Define a workflow
 
-A workflow is a list of named steps. Each step is an async function, and
-`needs` says which steps must succeed before it starts. `version` is any text
-you choose; change it when you change what a step's code does, so workers with
-the old code and the new never share a run:
+A workflow is code: an async function that asks for **steps** and returns the
+run's output. A step is a named piece of work, such as a call to another
+service. The engine saves each step's result, retries it if it throws, and
+gives it to another worker if its worker dies.
 
 ```ts
 // stockReport.ts
@@ -69,32 +69,60 @@ export interface StockReportInput {
 export default defineWorkflow<StockReportInput>({
   name: "stock-report",
   version: "1",
-  steps: [
-    {
-      name: "fetch-prices",
-      async run() {
-        return { prices: [] };
-      },
-    },
-    {
-      name: "fetch-news",
-      needs: [], // needs nothing, so it starts with fetch-prices
-      async run() {
-        return { headlines: [] };
-      },
-    },
-    {
-      name: "write-report",
-      needs: ["fetch-prices", "fetch-news"], // waits for both
-      async run(ctx) {
-        const { prices } = ctx.outputs["fetch-prices"];
-        const { headlines } = ctx.outputs["fetch-news"];
-        return { ticker: ctx.input.ticker, prices, headlines };
-      },
-    },
-  ],
+  async run(ctx) {
+    const { ticker } = ctx.input;
+
+    // Asked for together, so they run side by side, on any two workers.
+    const [prices, headlines] = await Promise.all([
+      ctx.step("fetch-prices", () => fetchPrices(ticker)),
+      ctx.step("fetch-news", () => fetchNews(ticker), { maxAttempts: 5 }),
+    ]);
+
+    // Ordinary code decides what happens next.
+    if (prices.length === 0) return { ticker, report: null };
+
+    const report = await ctx.step("write-report", (step) =>
+      writeReport({ ticker, prices, headlines, key: step.idempotencyKey }),
+    );
+    return { ticker, report };
+  },
 });
 ```
+
+`ctx.step(name, fn, options)` asks for a step and waits for its result.
+
+- **`fn`** does the work. It gets the step's `attempt`, an `idempotencyKey`
+  that is the same on every attempt, and an `abortSignal` that fires when the
+  result won't be used.
+- **`options`** are the step's own `leaseMs`, `maxAttempts`, `backoffMs` and
+  `timeoutMs`. Each falls back to the engine's setting.
+- **A step that fails for good throws** a `StepFailedError` where the workflow
+  asked for it. Catch it to carry on, for example to undo earlier steps. If you
+  don't, the run fails for the step's reason.
+
+**How it runs.** The engine runs the function again from the top each time one
+of its steps finishes, handing back the results it has saved. A step whose
+result is saved doesn't run again, so the function goes straight to the first
+thing it doesn't have yet. No worker is held while a run waits: any worker can
+pick it up, and a run survives every worker restarting. A run lasts exactly as
+long as the function: when it returns or throws, the run is over, and a step
+still running is stopped.
+
+**The rules that follow from that.** The function must do the same thing every
+time it is run with the same saved results:
+
+1. Only `await` what `ctx` gives you. No timers or requests outside a step.
+2. Put anything that can differ between two runs inside a step: the clock,
+   random numbers, anything read from outside.
+3. Use each step name once in a run. In a loop, put the counter in the name.
+4. Change `version` when you change the function in a way that runs already in
+   progress couldn't carry on with: a step renamed, removed or asked for in a
+   different order. A run belongs to the version it started on, and only
+   workers with that version work on it. The engine can't see inside the
+   function, so `version` is the only thing that makes a new version.
+
+Where the engine can tell a rule was broken, the run fails with
+`nondeterministic` or `workflow_error`; it never quietly does something else.
 
 ### Create the engine
 
@@ -128,8 +156,9 @@ They only share the database, so each can run as its own process, container
 or pod.
 
 **Whatever starts runs**, such as your API. `sync()` saves each workflow's
-plan, which starting a run needs; call it once at startup. `startRun` only records
-the run and returns its id. Workers do the work.
+name and version, which starting a run needs; call it once at startup.
+`startRun` only records the run and returns its id. Workers do the work: this
+process never runs your workflow's code.
 
 ```ts
 // api.ts
@@ -140,8 +169,9 @@ await engine.sync();
 const runId = await engine.startRun({ workflow: "stock-report", input: { ticker: "AAPL" } });
 ```
 
-**Workers** claim ready steps and run them, until they're told to stop. Run
-as many as you need; two never get the same step.
+**Workers** run your code, until they're told to stop: the workflow's
+function, to see what it asks for next, and the steps it asks for. Run as many
+as you need; two never get the same step.
 
 ```ts
 // worker.ts
@@ -175,23 +205,23 @@ Workers don't call `sync()`.
 
 ### Messages, the outbox and the relay
 
-A worker claims steps until there are none, then waits to be told there is
-work. The message broker is what tells it.
+A worker does what there is to do until there is nothing, then waits to be
+told there is work. The message broker is what tells it.
 
 ```
 store ──(same transaction)──▶ outbox ──(orchestrator's relay)──▶ message broker ──▶ workers
 ```
 
 - The store saves a message in its `outbox` table in the same transaction as
-  the change it is about: `step_ready` when a step becomes claimable
-  (for a retry, held back until its backoff is over), `run_cancelled` when a
-  run with a running step is cancelled.
+  the change it is about: `step_ready` when there is something for a worker
+  to do (for a retry, held back until its backoff is over), `run_cancelled`
+  when a step that is running is stopped.
 - The orchestrator publishes what is waiting every `relayIntervalMs` (100ms)
   and deletes it once published. A broker that is down delays messages; it
   never loses them. A message can arrive twice.
-- A worker that gets `step_ready` claims at once. One that gets
+- A worker that gets `step_ready` looks for work at once. One that gets
   `run_cancelled` for its run asks the store whether it still owns its step, and
-  fires `ctx.signal` if not.
+  fires the step's `abortSignal` if not.
 
 A message is only a hint: the store still decides who gets a step.
 
@@ -222,9 +252,9 @@ export default defineWorkflow<StockReportInput>({
   name: "stock-report",
   version: "1",
   concurrency: { key: (input) => `ticker:${input.ticker}`, limit: 1 }, // one report per ticker at a time
-  steps: [
+  async run(ctx) {
     // ...as above
-  ],
+  },
 });
 ```
 
@@ -303,10 +333,9 @@ dashboard on top.
 | Table           | Holds                                                                   |
 | --------------- | ----------------------------------------------------------------------- |
 | `workflows`     | One row per version of a workflow, with its `version`                   |
-| `steps`         | The steps in each workflow version                                      |
 | `schedules`     | One row per schedule, with when it next fires                           |
 | `workflow_runs` | One row each time a workflow is started, with the version it started on |
-| `step_runs`     | Progress of each step in a run; workers claim from here                 |
+| `step_runs`     | Each step a run has asked for, and how it went; workers claim from here |
 | `events`        | Append-only history of every state change                               |
 | `outbox`        | Messages waiting to be published to the message broker                  |
 

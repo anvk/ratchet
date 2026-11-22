@@ -14,34 +14,31 @@ export default describeWorkflow<GreetingInput>({
   version: "1",
   title: "Send a greeting",
   description: "A three-step example showing how little a new workflow needs.",
-  steps: [
-    {
-      name: "choose-recipient",
+  steps: {
+    "choose-recipient": {
       title: "Choose recipient",
       description: "Reads who to greet from the run's input.",
-      async run(ctx) {
-        await sleep(1000 * (ctx.input.timeScale ?? 1));
-        if (!ctx.input.name) throw new Error("Nobody to greet");
-        return { recipient: ctx.input.name };
-      },
     },
-    {
-      name: "write-message",
+    "write-message": {
       title: "Write message",
       description: "Builds the greeting from the previous step's output.",
-      async run(ctx) {
-        await sleep(1500 * (ctx.input.timeScale ?? 1));
-        return { message: `Hello, ${ctx.outputs["choose-recipient"].recipient}!` };
-      },
     },
-    {
-      name: "send-message",
-      title: "Send message",
-      description: "Pretends to deliver the message.",
-      async run(ctx) {
-        await sleep(1000 * (ctx.input.timeScale ?? 1));
-        return { sent: ctx.outputs["write-message"].message };
-      },
-    },
-  ],
+    "send-message": { title: "Send message", description: "Pretends to deliver the message." },
+  },
+  async run(ctx) {
+    const scale = ctx.input.timeScale ?? 1;
+    const { recipient } = await ctx.step("choose-recipient", async () => {
+      await sleep(1000 * scale);
+      if (!ctx.input.name) throw new Error("Nobody to greet");
+      return { recipient: ctx.input.name };
+    });
+    const { message } = await ctx.step("write-message", async () => {
+      await sleep(1500 * scale);
+      return { message: `Hello, ${recipient}!` };
+    });
+    return ctx.step("send-message", async () => {
+      await sleep(1000 * scale);
+      return { sent: message };
+    });
+  },
 });

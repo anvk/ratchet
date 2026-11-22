@@ -19,11 +19,11 @@ test("every other status shows as it is", () => {
 
 test("stepDepths puts steps that run side by side at the same depth", () => {
   const diamond = [
-    { name: "receive", needs: [] },
-    { name: "validate", needs: ["receive"] },
-    { name: "risk", needs: ["validate"] },
-    { name: "sanctions", needs: ["validate"] },
-    { name: "ledger", needs: ["risk", "sanctions"] },
+    { name: "receive", asked_after: [] },
+    { name: "validate", asked_after: ["receive"] },
+    { name: "risk", asked_after: ["validate"] },
+    { name: "sanctions", asked_after: ["validate"] },
+    { name: "ledger", asked_after: ["risk", "sanctions"] },
   ];
   assert.deepEqual(Object.fromEntries(stepDepths(diamond)), {
     receive: 0,
@@ -36,9 +36,9 @@ test("stepDepths puts steps that run side by side at the same depth", () => {
 
 test("stepDepths uses the furthest step needed", () => {
   const uneven = [
-    { name: "a", needs: [] },
-    { name: "b", needs: ["a"] },
-    { name: "c", needs: ["a", "b"] },
+    { name: "a", asked_after: [] },
+    { name: "b", asked_after: ["a"] },
+    { name: "c", asked_after: ["a", "b"] },
   ];
   assert.deepEqual(Object.fromEntries(stepDepths(uneven)), { a: 0, b: 1, c: 2 });
 });

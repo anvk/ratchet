@@ -4,11 +4,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DEFAULT_ENGINE_SETTINGS } from "../src/workflowEngine.constants.ts";
 import {
-  ancestors,
   assertUnique,
   canRedrive,
-  dependents,
-  resolveNeeds,
   retryDelayMs,
   stepDefaults,
 } from "../src/workflowEngine.utils.ts";
@@ -60,57 +57,14 @@ test("stepDefaults picks the step-related settings", () => {
   });
 });
 
-// receive → validate → (risk, sanctions) → ledger, like the payment workflow.
-const diamond = [
-  { name: "receive", needs: [] },
-  { name: "validate", needs: ["receive"] },
-  { name: "risk", needs: ["validate"] },
-  { name: "sanctions", needs: ["validate"] },
-  { name: "ledger", needs: ["risk", "sanctions"] },
-];
-
-test("resolveNeeds makes steps without needs run in order", () => {
-  assert.deepEqual(resolveNeeds([{ name: "a" }, { name: "b" }, { name: "c" }]), [
-    { name: "a", needs: [] },
-    { name: "b", needs: ["a"] },
-    { name: "c", needs: ["b"] },
-  ]);
-});
-
-test("resolveNeeds keeps needs that are given, including none", () => {
-  assert.deepEqual(resolveNeeds([{ name: "a" }, { name: "b", needs: [] }, { name: "c" }]), [
-    { name: "a", needs: [] },
-    { name: "b", needs: [] },
-    { name: "c", needs: ["b"] },
-  ]);
-});
-
-test("ancestors includes steps needed through other steps", () => {
-  assert.deepEqual([...ancestors(diamond, "ledger")].sort(), [
-    "receive",
-    "risk",
-    "sanctions",
-    "validate",
-  ]);
-});
-
-test("ancestors leaves out steps running side by side", () => {
-  assert.deepEqual([...ancestors(diamond, "risk")].sort(), ["receive", "validate"]);
-  assert.equal(ancestors(diamond, "receive").size, 0);
-});
-
 test("canRedrive allows cancelled runs and failures that a fix could cure, not decisions", () => {
   assert.equal(canRedrive("cancelled", null), true);
   assert.equal(canRedrive("failed", "attempts_exhausted"), true);
   assert.equal(canRedrive("failed", "lost_worker"), true);
   assert.equal(canRedrive("failed", "unknown_step"), true);
+  assert.equal(canRedrive("failed", "workflow_error"), true);
+  assert.equal(canRedrive("failed", "nondeterministic"), true);
   assert.equal(canRedrive("failed", "non_retryable"), false);
   assert.equal(canRedrive("succeeded", null), false);
   assert.equal(canRedrive("running", null), false);
-});
-
-test("dependents includes steps that depend on a step through others", () => {
-  assert.deepEqual([...dependents(diamond, "validate")].sort(), ["ledger", "risk", "sanctions"]);
-  assert.deepEqual([...dependents(diamond, "risk")], ["ledger"], "not the parallel sanctions");
-  assert.equal(dependents(diamond, "ledger").size, 0);
 });

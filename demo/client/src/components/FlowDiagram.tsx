@@ -66,7 +66,9 @@ export function FlowDiagram({
   selectedStepName: string | null;
   onSelect: (name: string) => void;
 }) {
-  // One column per depth, so steps that can run side by side are stacked,
+  // The diagram shows the steps a run has asked for so far, and grows as the
+  // run goes: a workflow is code, so its later steps aren't known until it asks
+  // for them. One column per depth, so steps that ran side by side are stacked,
   // centred on the same line as the steps before and after them.
   const depths = stepDepths(steps);
   const columns = new Map<number, Step[]>();
@@ -83,10 +85,11 @@ export function FlowDiagram({
     })),
   );
 
+  // An arrow runs to a step from each step it came straight after.
   const edges: Edge[] = steps.flatMap((step) =>
-    step.needs.map((need) => ({
-      id: `${need}-${step.name}`,
-      source: need,
+    step.asked_after.map((earlier) => ({
+      id: `${earlier}-${step.name}`,
+      source: earlier,
       target: step.name,
       animated: step.status === "running",
     })),

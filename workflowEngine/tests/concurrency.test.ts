@@ -20,7 +20,7 @@ const grouped = defineWorkflow<GroupedInput>({
   name: "concurrency-grouped",
   version: "1",
   concurrency: { key: (input) => input.group ?? null, limit: 2 },
-  steps: [{ name: "only", run: async () => null }],
+  run: (ctx) => ctx.step("only", () => null),
 });
 
 /** The concurrency columns of a run. */
@@ -49,7 +49,7 @@ test("defineWorkflow rejects a concurrency limit that isn't a whole, positive nu
       name: "concurrency-bad",
       version: "1",
       concurrency: { key: () => "a", limit },
-      steps: [{ name: "only", run: async () => null }],
+      run: (ctx) => ctx.step("only", () => null),
     });
   for (const limit of [0, -1, 1.5]) {
     assert.throws(() => define(limit), /needs a whole, positive concurrency limit/);
@@ -86,7 +86,7 @@ test("changing a workflow's concurrency limit does not create a new version", as
       name: "concurrency-versioned",
       version: "1",
       concurrency: { key: () => "a", limit },
-      steps: [{ name: "only", run: async () => null }],
+      run: (ctx) => ctx.step("only", () => null),
     });
   await createWorkflowEngine({
     messageBroker: createPollingMessageBroker(),
@@ -206,7 +206,7 @@ test("runs of different groups don't wait for each other", async () => {
   await waitForFinish(runIds);
 });
 
-test("a run that has to wait has no ready step until it is admitted", async () => {
+test("a run that has to wait has no steps until it is admitted", async () => {
   const first = await startFixture("exclusive", { group: "waiting", ms: 1000 });
   const second = await startFixture("exclusive", { group: "waiting", ms: 50 });
 
@@ -218,7 +218,8 @@ test("a run that has to wait has no ready step until it is admitted", async () =
     .select("status")
     .where("run_id", "=", second)
     .execute();
-  assert.ok(steps.length > 0 && steps.every((s) => s.status === "pending"));
+  // Its code doesn't run, so it asks for nothing, until it has a slot.
+  assert.deepEqual(steps, []);
   assert.deepEqual(
     (await eventTypes(second)).filter((t) => t === "run_waiting"),
     ["run_waiting"],

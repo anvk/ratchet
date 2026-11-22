@@ -1,22 +1,17 @@
-import { createHash } from "node:crypto";
 import { sql } from "kysely";
 import { InvalidScheduleError } from "../../workflowEngine.errors.ts";
 import { db, type Tx } from "./db/index.ts";
-import {
-  ancestors,
-  canRedrive,
-  dependents,
-  resolveNeeds,
-  retryDelayMs,
-} from "../../workflowEngine.utils.ts";
+import { canRedrive, retryDelayMs } from "../../workflowEngine.utils.ts";
 import { nextFireAfter } from "../../workflowEngine.cron.ts";
 import type { FailureReason } from "../../workflowEngine.constants.ts";
 import type {
+  AdvanceRun,
   Claim,
   ClaimOrder,
   EngineMessage,
   EventFields,
   FinalFailure,
+  SavedStep,
   ScheduledRun,
   StepDefaults,
   WorkflowDefinition,
@@ -73,72 +68,24 @@ async function enqueue({
     .execute();
 }
 
-const planHashes = new WeakMap<WorkflowDefinition, string>();
-
 /**
- * Hashes the parts of a workflow kept in the plan tables, and the `version` its
- * author gave it, so an edit to either creates a new row in workflows.
- * Remembered per definition, since workers ask on every claim.
+ * Matches the rows of `workflows` (as `w`) that are one of these workflows at
+ * the version this process has. A worker's claims are limited by it, so it never
+ * works on a run started on code it doesn't have.
  */
-function planHash(definition: WorkflowDefinition): string {
-  let hash = planHashes.get(definition);
-  if (!hash) {
-    hash = hashPlan(definition);
-    planHashes.set(definition, hash);
-  }
-  return hash;
-}
+const versionIn = (workflows: WorkflowDefinition[]) =>
+  sql<boolean>`(w.name, w.version) IN (${sql.join(
+    workflows.map((workflow) => sql`(${workflow.name}, ${workflow.version})`),
+  )})`;
 
-/** The hash behind planHash. */
-function hashPlan(definition: WorkflowDefinition): string {
-  const links = resolveNeeds(definition.steps);
-  const plan = {
-    name: definition.name,
-    version: definition.version,
-    steps: definition.steps.map(({ name, leaseMs, maxAttempts, backoffMs }, i) => ({
-      name,
-      needs: links[i].needs,
-      leaseMs,
-      maxAttempts,
-      backoffMs,
-    })),
-  };
-  return createHash("sha256").update(JSON.stringify(plan)).digest("hex").slice(0, 12);
-}
-
-/** Copies workflows into the plan tables. Workflows already saved are left alone. */
+/** Saves each workflow's name and version. Ones already saved are left alone. */
 async function syncWorkflows(workflows: WorkflowDefinition[]) {
-  for (const definition of workflows) {
-    await db.transaction().execute(async (trx) => {
-      const created = await trx
-        .insertInto("workflows")
-        .values({
-          name: definition.name,
-          version: definition.version,
-          plan_hash: planHash(definition),
-        })
-        .onConflict((oc) => oc.columns(["name", "plan_hash"]).doNothing())
-        .returning("id")
-        .executeTakeFirst();
-      if (!created) return;
-
-      const links = resolveNeeds(definition.steps);
-      await trx
-        .insertInto("steps")
-        .values(
-          definition.steps.map((step, position) => ({
-            workflow_id: created.id,
-            name: step.name,
-            position,
-            needs: links[position].needs,
-            lease_ms: step.leaseMs ?? null,
-            max_attempts: step.maxAttempts ?? null,
-            backoff_ms: step.backoffMs ?? null,
-          })),
-        )
-        .execute();
-    });
-  }
+  if (workflows.length === 0) return;
+  await db
+    .insertInto("workflows")
+    .values(workflows.map(({ name, version }) => ({ name, version })))
+    .onConflict((oc) => oc.columns(["name", "version"]).doNothing())
+    .execute();
 }
 
 /**
@@ -165,8 +112,8 @@ async function slotsInUse({ trx, key }: { trx: Tx; key: string }): Promise<numbe
 
 /**
  * Gives free slots in a group to its waiting runs, oldest first, for as long as
- * there are both. Admitting a run readies its steps that need nothing (or whose
- * needs have succeeded, for a redriven run). It locks the run it admits as it
+ * there are both. Admitting a run marks it to be advanced, which is when its
+ * code runs and asks for its first steps. It locks the run it admits as it
  * picks it, and skips one that is locked by another transaction: a waiting run
  * is only locked while it is being cancelled, and that transaction may be
  * waiting for the group lock this one holds. Runs this transaction already
@@ -196,8 +143,7 @@ async function admitWaitingRuns({ trx, key }: { trx: Tx; key: string }) {
       .where("id", "=", next.id)
       .execute();
     await emit({ trx, runId: next.id, type: "run_admitted" });
-    const ready = await readyUnblockedSteps({ trx, runId: next.id });
-    if (ready.length > 0) await enqueue({ trx, message: { type: "step_ready" } });
+    await markForAdvance({ trx, runId: next.id });
   }
 }
 
@@ -212,10 +158,24 @@ async function emitWaitingIfNotAdmitted({ trx, runId }: { trx: Tx; runId: string
 }
 
 /**
- * Creates a run and its step runs, with every step that needs nothing ready to
- * claim, and returns the run's id. The workflow must already be saved by syncWorkflows.
- * A run in a group with no free slot is created waiting, with every step pending,
- * until admitWaitingRuns gives it a slot.
+ * Marks a run as needing its workflow's code run again, and tells workers
+ * there is something to do. For changes made where that code can't be run: by
+ * a process that isn't a worker, or one that may not have the run's version.
+ */
+async function markForAdvance({ trx, runId }: { trx: Tx; runId: string }) {
+  await trx
+    .updateTable("workflow_runs")
+    .set({ advance_at: sql<Date>`clock_timestamp()` })
+    .where("id", "=", runId)
+    .execute();
+  await enqueue({ trx, message: { type: "step_ready" } });
+}
+
+/**
+ * Creates a run, marked to be advanced, and returns its id. It has no steps
+ * yet: they appear as its code asks for them. The workflow must already be
+ * saved by syncWorkflows. A run in a group with no free slot is created
+ * waiting, and is marked only when admitWaitingRuns gives it a slot.
  */
 async function startRun({
   definition,
@@ -259,15 +219,8 @@ async function insertRun({
     .selectFrom("workflows")
     .select("id")
     .where("name", "=", definition.name)
-    .where("plan_hash", "=", planHash(definition))
+    .where("version", "=", definition.version)
     .executeTakeFirstOrThrow();
-
-  const steps = await trx
-    .selectFrom("steps")
-    .select(["id", "name", "position", "needs"])
-    .where("workflow_id", "=", workflow.id)
-    .orderBy("position")
-    .execute();
 
   // The group lock comes before the insert, so the new run is counted and
   // admitted under the same lock as everything else in its group.
@@ -311,30 +264,11 @@ async function insertRun({
     detail: schedule && { schedule: schedule.name, scheduledFor: schedule.scheduledFor },
   });
 
-  // In a group, every step starts pending: admission readies the first ones.
-  const ready = (step: { needs: string[] }) => !concurrency && step.needs.length === 0;
-  await trx
-    .insertInto("step_runs")
-    .values(
-      steps.map((step) => ({
-        run_id: run.id,
-        step_id: step.id,
-        name: step.name,
-        position: step.position,
-        needs: step.needs,
-        status: ready(step) ? ("ready" as const) : ("pending" as const),
-        ready_at: ready(step) ? sql<Date>`now()` : null,
-      })),
-    )
-    .execute();
-  for (const step of steps.filter(ready)) {
-    await emit({ trx, runId: run.id, type: "step_ready", stepName: step.name });
-  }
-  if (steps.some(ready)) await enqueue({ trx, message: { type: "step_ready" } });
-
   if (concurrency) {
     await admitWaitingRuns({ trx, key: concurrency.key });
     await emitWaitingIfNotAdmitted({ trx, runId: run.id });
+  } else {
+    await markForAdvance({ trx, runId: run.id });
   }
 
   return run.id;
@@ -344,8 +278,41 @@ async function insertRun({
 const fromNow = (ms: number) => sql<Date>`now() + (${ms}::int * interval '1 millisecond')`;
 
 /**
- * Gives a ready step to this worker: marks it running with a lease, starts the
- * run if this is its first step, and gathers what the step needs to run.
+ * What a run has saved about its steps, by name, as its workflow's code is
+ * handed it. A step that is ready or running is `open`. One put back by a
+ * redrive, or skipped, is left out: the code hasn't asked for it again yet.
+ */
+async function savedSteps({ trx, runId }: { trx: Tx; runId: string }) {
+  const rows = await trx
+    .selectFrom("step_runs")
+    .select([
+      "id",
+      "name",
+      "status",
+      "output",
+      "error",
+      "failure_reason",
+      "asked_after",
+      "position",
+    ])
+    .where("run_id", "=", runId)
+    .orderBy("position")
+    .execute();
+  const saved: Record<string, SavedStep> = {};
+  for (const row of rows) {
+    if (row.status === "succeeded") saved[row.name] = { status: "succeeded", output: row.output };
+    else if (row.status === "failed") {
+      saved[row.name] = { status: "failed", reason: row.failure_reason!, error: row.error ?? "" };
+    } else if (row.status === "ready" || row.status === "running") {
+      saved[row.name] = { status: "open" };
+    }
+  }
+  return { rows, saved };
+}
+
+/**
+ * Gives a ready step to this worker: marks it running with a lease, and
+ * gathers what the worker needs to find the step's code and run it.
  */
 async function takeStep({
   trx,
@@ -358,15 +325,6 @@ async function takeStep({
   workerId: string;
   defaults: StepDefaults;
 }): Promise<Claim> {
-  // A step added at runtime has no plan row, so it gets the default.
-  const plan = await trx
-    .selectFrom("step_runs as sr")
-    .leftJoin("steps as s", "s.id", "sr.step_id")
-    .select("s.lease_ms")
-    .where("sr.id", "=", stepRunId)
-    .executeTakeFirstOrThrow();
-  const leaseMs = plan.lease_ms ?? defaults.leaseMs;
-
   const step = await trx
     .updateTable("step_runs")
     .set((eb) => ({
@@ -374,33 +332,12 @@ async function takeStep({
       attempt: eb("attempt", "+", 1),
       worker_id: workerId,
       started_at: sql<Date>`now()`,
-      lease_expires_at: fromNow(leaseMs),
+      // The step's own lease, from where the workflow asked for it, or the default.
+      lease_expires_at: sql<Date>`now() + (coalesce(lease_ms, ${defaults.leaseMs}::int) * interval '1 millisecond')`,
     }))
     .where("id", "=", stepRunId)
-    .returning(["id", "run_id", "name", "position", "attempt"])
+    .returning(["id", "run_id", "name", "attempt", "lease_ms"])
     .executeTakeFirstOrThrow();
-
-  // This is the one place a step's lock comes before its run's, so it must
-  // never wait for the run. The only thing that locks a run with claimable
-  // steps before it has started is a cancel, which finishes the run itself, so
-  // skipping the update then loses nothing. A lock this transaction already
-  // holds doesn't count as locked, so a claim made inside completeStep still
-  // starts nothing it shouldn't.
-  const started = await trx
-    .updateTable("workflow_runs")
-    .set({ status: "running", started_at: sql<Date>`now()` })
-    .where("id", "in", (eb) =>
-      eb
-        .selectFrom("workflow_runs")
-        .select("id")
-        .where("id", "=", step.run_id)
-        .where("status", "=", "queued")
-        .forUpdate()
-        .skipLocked(),
-    )
-    .returning("id")
-    .executeTakeFirst();
-  if (started) await emit({ trx, runId: step.run_id, type: "run_started" });
 
   await emit({
     trx,
@@ -417,28 +354,18 @@ async function takeStep({
     .select(["w.name as workflow", "r.input"])
     .where("r.id", "=", step.run_id)
     .executeTakeFirstOrThrow();
-
-  // Only what this step depends on: a step running alongside may or may not
-  // have finished, so reading its output would depend on timing.
-  const runSteps = await trx
-    .selectFrom("step_runs")
-    .select(["name", "needs", "output"])
-    .where("run_id", "=", step.run_id)
-    .execute();
-  const ancestorNames = ancestors(runSteps, step.name);
-  const ancestorSteps = runSteps.filter((s) => ancestorNames.has(s.name));
+  const { saved } = await savedSteps({ trx, runId: step.run_id });
 
   return {
     stepRunId: step.id,
     stepName: step.name,
-    position: step.position,
     attempt: step.attempt,
-    leaseMs,
+    leaseMs: step.lease_ms ?? defaults.leaseMs,
     workerId,
     runId: step.run_id,
     workflow: run.workflow,
     input: run.input,
-    outputs: Object.fromEntries(ancestorSteps.map((s) => [s.name, s.output])),
+    saved,
   };
 }
 
@@ -472,9 +399,8 @@ async function claimStep({
       .where("sr.status", "=", "ready")
       // A step waiting to retry is ready, but not until its backoff is over.
       .where("sr.ready_at", "<=", sql<Date>`now()`)
-      // The hash includes the name, so it picks out one version of one
-      // workflow: a worker never runs a step it has different code for.
-      .where("w.plan_hash", "in", workflows.map(planHash));
+      // A worker never runs a step of a run started on code it doesn't have.
+      .where(versionIn(workflows));
     if (order === "oldest-run-first") query = query.orderBy("r.created_at").orderBy("r.id");
     const next = await query
       .orderBy("sr.ready_at")
@@ -525,80 +451,277 @@ async function finishOwnedStep({
 }
 
 /**
- * Locks a run's row until the transaction ends. Every change to a started run's
- * steps takes this lock first, so two steps of one run finishing at the same
- * moment take turns, and the second one sees the first as finished. The order
- * everywhere is the run's lock, then its group's lock (lockGroup), then its
- * steps' locks (a schedule's row lock, taken by fireDueSchedules, comes before
- * all of them), so two transactions can never end up waiting on each other.
- * Cancelling a run takes it too, in its own query (see cancelRun).
+ * Locks a run's row until the transaction ends. Every change to a run's steps
+ * takes this lock first, and so does every advance, so two steps of one run
+ * finishing at the same moment take turns, and the second one's advance sees
+ * the first as finished. The order everywhere is the run's lock, then its
+ * group's lock (lockGroup), then its steps' locks (a schedule's row lock, taken
+ * by fireDueSchedules, comes before all of them), so two transactions can never
+ * end up waiting on each other.
+ *
+ * FOR NO KEY UPDATE, not FOR UPDATE. The one thing that takes a step's lock
+ * before its run's is a claim, which then writes an event, and an event row
+ * points at its run: Postgres takes a FOR KEY SHARE lock on the run for that.
+ * FOR UPDATE would make the claim wait for whoever holds the run, while a run
+ * that is finishing or being cancelled waits for the step the claim holds.
+ * FOR NO KEY UPDATE still makes every holder of this lock take turns, and lets
+ * rows that merely point at the run through.
  */
 async function lockRun({ trx, runId }: { trx: Tx; runId: string }) {
   await trx
     .selectFrom("workflow_runs")
     .select("id")
     .where("id", "=", runId)
-    .forUpdate()
+    .forNoKeyUpdate()
     .executeTakeFirstOrThrow();
 }
 
 /**
- * Readies every pending step of a run whose needs have all succeeded, and
- * returns them in order. With `finishedStep`, only steps that need that step,
- * since nothing else can have changed. Call it with the run locked. Saving the
- * `step_ready` message is left to the caller, which knows whether any of them
- * is left for another worker.
+ * Ends every step of a run that hasn't finished, and returns whether any was
+ * running. A step that hadn't started becomes `skipped`; a running one becomes
+ * `failed` with reason `cancelled` and `error`, so its worker's next heartbeat
+ * fails and its late result is refused. Call it with the run locked.
+ *
+ * One statement, deciding per row, never "skip the unstarted" and then "fail
+ * the running": a step could go from ready to running between the two and be
+ * left running in a finished run. When this has to wait for a step that a claim
+ * holds, Postgres re-reads the row once the claim commits and applies both the
+ * WHERE and the CASEs to the new version, so a step claimed in the meantime is
+ * correctly failed. In a SET, `status` on the right is the row's old value,
+ * which the CASEs rely on.
  */
-async function readyUnblockedSteps({
-  trx,
-  runId,
-  finishedStep,
-}: {
-  trx: Tx;
-  runId: string;
-  finishedStep?: string;
-}) {
-  let query = trx
-    .updateTable("step_runs as sr")
-    .set({ status: "ready", ready_at: sql<Date>`now()` })
-    .where("sr.run_id", "=", runId)
-    .where("sr.status", "=", "pending")
-    .where((eb) =>
-      eb.not(
-        eb.exists(
-          eb
-            .selectFrom("step_runs as d")
-            .select("d.id")
-            .whereRef("d.run_id", "=", "sr.run_id")
-            .where(sql<boolean>`d.name = ANY(sr.needs)`)
-            .where("d.status", "!=", "succeeded"),
-        ),
-      ),
-    );
-  if (finishedStep) query = query.where(sql<boolean>`${finishedStep} = ANY(sr.needs)`);
-  const ready = await query.returning(["sr.id", "sr.name", "sr.position"]).execute();
-  ready.sort((a, b) => a.position - b.position);
-  for (const step of ready) {
-    await emit({ trx, runId, type: "step_ready", stepName: step.name });
+async function stopSteps({ trx, runId, error }: { trx: Tx; runId: string; error: string }) {
+  const steps = await trx
+    .updateTable("step_runs")
+    .set({
+      status: sql`CASE WHEN status = 'running' THEN 'failed'::step_run_status ELSE 'skipped'::step_run_status END`,
+      error: sql`CASE WHEN status = 'running' THEN ${error} ELSE error END`,
+      failure_reason: sql`CASE WHEN status = 'running' THEN 'cancelled'::failure_reason ELSE NULL END`,
+      finished_at: sql<Date>`now()`,
+      lease_expires_at: null,
+    })
+    .where("run_id", "=", runId)
+    .where("status", "in", ["pending", "ready", "running"])
+    .returning(["name", "position", "status", "attempt", "worker_id"])
+    .execute();
+  steps.sort((a, b) => a.position - b.position);
+  for (const step of steps) {
+    if (step.status === "failed") {
+      await emit({
+        trx,
+        runId,
+        type: "step_failed",
+        stepName: step.name,
+        attempt: step.attempt,
+        workerId: step.worker_id ?? undefined,
+        detail: { error, failureReason: "cancelled" },
+      });
+    } else {
+      await emit({ trx, runId, type: "step_skipped", stepName: step.name });
+    }
   }
-  return ready;
+  return steps.some((step) => step.status === "failed");
 }
 
 /**
- * Records a step's success, then readies every step whose needs have now all
- * succeeded, or finishes the run if every step has. With claimNext, the first
- * newly ready step goes straight to the same worker.
+ * Advances a run: hands everything it has saved to its workflow's code, and
+ * acts on what the code does. Returns the steps it made claimable, in the order
+ * the code asked for them. Call it with the run locked; telling workers about
+ * the new steps is left to the caller, which knows whether it is about to take
+ * one itself.
+ *
+ * - The code is waiting for steps: each one it asked for that the run doesn't
+ *   have becomes a ready step, with the settings it was asked for with. A step
+ *   put back by a redrive becomes ready again when the code asks for it again.
+ * - The code returned: the run succeeds, with what it returned as its output.
+ * - The code threw, or broke a rule replaying depends on: the run fails.
+ *
+ * A run lasts exactly as long as its code. When it finishes either way, steps
+ * that haven't started are skipped and steps still running are stopped, and a
+ * run in a group gives its slot to the oldest waiting run.
+ *
+ * A run that has already finished is left alone.
+ */
+async function applyAdvance({
+  trx,
+  runId,
+  advance,
+}: {
+  trx: Tx;
+  runId: string;
+  advance: AdvanceRun;
+}): Promise<{ id: string; name: string }[]> {
+  const run = await trx
+    .selectFrom("workflow_runs as r")
+    .innerJoin("workflows as w", "w.id", "r.workflow_id")
+    .select(["r.status", "r.input", "r.finished_at", "r.concurrency_key", "w.name as workflow"])
+    .where("r.id", "=", runId)
+    .executeTakeFirstOrThrow();
+  if (run.finished_at !== null) return [];
+
+  const { rows, saved } = await savedSteps({ trx, runId });
+  const decision = await advance({
+    workflow: run.workflow,
+    runId,
+    input: run.input,
+    steps: saved,
+    after: Object.fromEntries(rows.map((row) => [row.name, row.asked_after])),
+  });
+
+  await trx
+    .updateTable("workflow_runs")
+    .set({
+      advance_at: null,
+      // A run starts the first time its code runs.
+      ...(run.status === "queued" ? { status: "running", started_at: sql<Date>`now()` } : {}),
+    })
+    .where("id", "=", runId)
+    .execute();
+  if (run.status === "queued") await emit({ trx, runId, type: "run_started" });
+
+  if (decision.kind === "parked") {
+    const byName = new Map(rows.map((row) => [row.name, row]));
+    let position = rows.reduce((highest, row) => Math.max(highest, row.position), -1);
+    const readied: { id: string; name: string }[] = [];
+    for (const asked of decision.requested) {
+      const settings = {
+        status: "ready" as const,
+        ready_at: sql<Date>`now()`,
+        asked_after: asked.after,
+        lease_ms: asked.options.leaseMs ?? null,
+        max_attempts: asked.options.maxAttempts ?? null,
+        backoff_ms: asked.options.backoffMs ?? null,
+      };
+      // A row is already there for a step a redrive put back.
+      const existing = byName.get(asked.name);
+      const step = existing
+        ? await trx
+            .updateTable("step_runs")
+            .set(settings)
+            .where("id", "=", existing.id)
+            .returning("id")
+            .executeTakeFirstOrThrow()
+        : await trx
+            .insertInto("step_runs")
+            .values({ run_id: runId, name: asked.name, position: ++position, ...settings })
+            .returning("id")
+            .executeTakeFirstOrThrow();
+      await emit({ trx, runId, type: "step_ready", stepName: asked.name });
+      readied.push({ id: step.id, name: asked.name });
+    }
+    return readied;
+  }
+
+  const stoppedRunning = await stopSteps({
+    trx,
+    runId,
+    error:
+      decision.kind === "failed"
+        ? "The workflow failed before this step finished"
+        : "The workflow finished without waiting for this step",
+  });
+  if (decision.kind === "completed") {
+    await trx
+      .updateTable("workflow_runs")
+      .set({
+        status: "succeeded",
+        // undefined, what a function with no return gives, can't be saved as JSON.
+        output: JSON.stringify(decision.output ?? null),
+        finished_at: sql<Date>`now()`,
+      })
+      .where("id", "=", runId)
+      .execute();
+    await emit({ trx, runId, type: "run_succeeded" });
+  } else {
+    await trx
+      .updateTable("workflow_runs")
+      .set({ status: "failed", failure_reason: decision.reason, finished_at: sql<Date>`now()` })
+      .where("id", "=", runId)
+      .execute();
+    await emit({
+      trx,
+      runId,
+      type: "run_failed",
+      detail: { step: decision.step, error: decision.error, failureReason: decision.reason },
+    });
+  }
+  // So the workers of the stopped steps hear now, not at their next heartbeat.
+  if (stoppedRunning) await enqueue({ trx, message: { type: "run_cancelled", runId } });
+  await giveUpSlot({ trx, key: run.concurrency_key });
+  return [];
+}
+
+/**
+ * Advances one run that is marked for it and is of a version in `workflows`,
+ * and returns whether there was such a run.
+ *
+ * The run is locked as it is picked, and one that another transaction holds is
+ * passed over, so workers spread over the marked runs instead of queueing for
+ * one. Whoever holds a run may not be advancing it, though: a retry being
+ * scheduled or a lease being swept holds it too. So if every marked run is
+ * held, this waits for one of them, and then advances it if it is still marked.
+ * It returns true either way, since there was work, and the caller looks again.
+ */
+async function advanceRun({
+  workflows,
+  advance,
+}: {
+  workflows: WorkflowDefinition[];
+  advance: AdvanceRun;
+}): Promise<boolean> {
+  if (workflows.length === 0) return false;
+
+  return db.transaction().execute(async (trx) => {
+    const marked = () =>
+      trx
+        .selectFrom("workflow_runs as r")
+        .innerJoin("workflows as w", "w.id", "r.workflow_id")
+        .select("r.id")
+        .where("r.advance_at", "is not", null)
+        .where(versionIn(workflows))
+        .orderBy("r.advance_at")
+        .orderBy("r.id")
+        .limit(1);
+    let next = await marked().forNoKeyUpdate("r").skipLocked().executeTakeFirst();
+    if (!next) {
+      const held = await marked().executeTakeFirst();
+      if (!held) return false;
+      // Waits for the holder. Postgres then checks advance_at again, and finds
+      // no row if the holder advanced the run itself.
+      next = await trx
+        .selectFrom("workflow_runs as r")
+        .select("r.id")
+        .where("r.id", "=", held.id)
+        .where("r.advance_at", "is not", null)
+        .forNoKeyUpdate()
+        .executeTakeFirst();
+      if (!next) return true;
+    }
+
+    const readied = await applyAdvance({ trx, runId: next.id, advance });
+    if (readied.length > 0) await enqueue({ trx, message: { type: "step_ready" } });
+    return true;
+  });
+}
+
+/**
+ * Records a step's success, then advances its run in the same transaction, so
+ * what comes next is decided from a state that includes this result. With
+ * claimNext, the first step the advance makes claimable goes straight to the
+ * same worker.
  */
 async function completeStep({
   claim,
   output,
   claimNext,
   defaults,
+  advance,
 }: {
   claim: Claim;
   output: unknown;
   claimNext: boolean;
   defaults: StepDefaults;
+  advance: AdvanceRun;
 }): Promise<{ completed: boolean; next: Claim | null }> {
   return db.transaction().execute(async (trx) => {
     await lockRun({ trx, runId: claim.runId });
@@ -614,40 +737,26 @@ async function completeStep({
       workerId: claim.workerId,
     });
 
-    // The join. Without the run lock, two steps finishing together would each
-    // see the other as still running, and neither would ready a step that needs both.
-    const ready = await readyUnblockedSteps({
-      trx,
-      runId: claim.runId,
-      finishedStep: claim.stepName,
-    });
-    if (ready.length > 0) {
-      // The step this worker takes for itself needs no message; the rest do.
-      if (ready.length > (claimNext ? 1 : 0)) {
-        await enqueue({ trx, message: { type: "step_ready" } });
-      }
-      if (!claimNext) return { completed: true, next: null };
-      // Still inside this transaction, so no other worker ever sees it ready.
-      // Any others stay ready for other workers.
-      return {
-        completed: true,
-        next: await takeStep({
-          trx,
-          stepRunId: ready[0].id,
-          workerId: claim.workerId,
-          defaults,
-        }),
-      };
+    // Under the run's lock: if another step of this run finishes at the same
+    // moment, one of the two advances second and sees both results.
+    const readied = await applyAdvance({ trx, runId: claim.runId, advance });
+    // The step this worker takes for itself needs no message; the rest do.
+    if (readied.length > (claimNext ? 1 : 0)) {
+      await enqueue({ trx, message: { type: "step_ready" } });
     }
-
-    await finishRunIfDone({ trx, runId: claim.runId });
-    return { completed: true, next: null };
+    if (!claimNext || readied.length === 0) return { completed: true, next: null };
+    // Still inside this transaction, so no other worker ever sees it ready.
+    return {
+      completed: true,
+      next: await takeStep({ trx, stepRunId: readied[0].id, workerId: claim.workerId, defaults }),
+    };
   });
 }
 
 /**
- * A step's own retry settings from its plan, or the defaults, and how many of
- * its attempts came before the run was last redriven, which don't count.
+ * A step's own retry settings, from where the workflow asked for it, or the
+ * defaults, and how many of its attempts came before the run was last redriven,
+ * which don't count.
  */
 async function retryPolicy({
   trx,
@@ -658,67 +767,16 @@ async function retryPolicy({
   stepRunId: string;
   defaults: StepDefaults;
 }) {
-  const plan = await trx
-    .selectFrom("step_runs as sr")
-    .leftJoin("steps as s", "s.id", "sr.step_id")
-    .select(["s.max_attempts", "s.backoff_ms", "sr.prior_attempts"])
-    .where("sr.id", "=", stepRunId)
+  const step = await trx
+    .selectFrom("step_runs")
+    .select(["max_attempts", "backoff_ms", "prior_attempts"])
+    .where("id", "=", stepRunId)
     .executeTakeFirstOrThrow();
   return {
-    maxAttempts: plan.max_attempts ?? defaults.maxAttempts,
-    backoffMs: plan.backoff_ms ?? defaults.backoffMs,
-    priorAttempts: plan.prior_attempts,
+    maxAttempts: step.max_attempts ?? defaults.maxAttempts,
+    backoffMs: step.backoff_ms ?? defaults.backoffMs,
+    priorAttempts: step.prior_attempts,
   };
-}
-
-/**
- * Finishes a run once nothing in it can move: no step is pending, ready or
- * running. It succeeded if every step did; otherwise it failed, with the
- * reason of the step that failed first. A run in a group gives its slot to the
- * oldest waiting run. Call it with the run locked.
- */
-async function finishRunIfDone({ trx, runId }: { trx: Tx; runId: string }) {
-  const steps = await trx
-    .selectFrom("step_runs")
-    .select(["name", "status", "error", "failure_reason", "finished_at", "position"])
-    .where("run_id", "=", runId)
-    .execute();
-  if (steps.some((s) => ["pending", "ready", "running"].includes(s.status))) return;
-
-  const failed = steps
-    .filter((s) => s.status === "failed")
-    .sort((a, b) => a.finished_at!.getTime() - b.finished_at!.getTime() || a.position - b.position);
-  const firstFailed = failed[0];
-  const finished = await trx
-    .updateTable("workflow_runs")
-    .set(
-      firstFailed
-        ? {
-            status: "failed",
-            failure_reason: firstFailed.failure_reason,
-            finished_at: sql<Date>`now()`,
-          }
-        : { status: "succeeded", finished_at: sql<Date>`now()` },
-    )
-    .where("id", "=", runId)
-    .returning("concurrency_key")
-    .executeTakeFirstOrThrow();
-  if (firstFailed) {
-    await emit({
-      trx,
-      runId,
-      type: "run_failed",
-      detail: {
-        step: firstFailed.name,
-        error: firstFailed.error,
-        failureReason: firstFailed.failure_reason,
-      },
-    });
-  } else {
-    await emit({ trx, runId, type: "run_succeeded" });
-  }
-
-  await giveUpSlot({ trx, key: finished.concurrency_key });
 }
 
 /**
@@ -732,78 +790,24 @@ async function giveUpSlot({ trx, key }: { trx: Tx; key: string | null }) {
 }
 
 /**
- * Follows up a step that has just been marked failed for good. Steps that
- * depend on it can never run, so they're skipped; every other step carries on,
- * so a run does all the work it still can. The run finishes once nothing is
- * left to move. Call it with the run locked.
- */
-async function recordFinalFailure({
-  trx,
-  runId,
-  stepName,
-  attempt,
-  workerId,
-  error,
-  failureReason,
-}: {
-  trx: Tx;
-  runId: string;
-  stepName: string;
-  attempt: number;
-  workerId?: string;
-  error: string;
-  failureReason: FailureReason;
-}) {
-  await emit({
-    trx,
-    runId,
-    type: "step_failed",
-    stepName,
-    attempt,
-    workerId,
-    detail: { error, failureReason },
-  });
-
-  const runSteps = await trx
-    .selectFrom("step_runs")
-    .select(["name", "needs"])
-    .where("run_id", "=", runId)
-    .execute();
-  const blocked = [...dependents(runSteps, stepName)];
-  if (blocked.length > 0) {
-    // Only pending ones: a step can't start before everything it depends on succeeds.
-    const skipped = await trx
-      .updateTable("step_runs")
-      .set({ status: "skipped", finished_at: sql<Date>`now()` })
-      .where("run_id", "=", runId)
-      .where("name", "in", blocked)
-      .where("status", "=", "pending")
-      .returning(["name", "position"])
-      .execute();
-    skipped.sort((a, b) => a.position - b.position);
-    for (const step of skipped)
-      await emit({ trx, runId, type: "step_skipped", stepName: step.name });
-  }
-
-  await finishRunIfDone({ trx, runId });
-}
-
-/**
  * Records a step's failure. A failure that isn't final, with attempts left,
- * makes the step ready again once its backoff has passed; anything else fails
- * the step for good (see recordFinalFailure). Returns recorded: false if this
- * worker no longer owns the step.
+ * makes the step ready again once its backoff has passed. Anything else fails
+ * the step for good and advances the run in the same transaction: its code is
+ * handed the failure, and either catches it or fails the run. Returns recorded:
+ * false if this worker no longer owns the step.
  */
 async function failStep({
   claim,
   error,
   final,
   defaults,
+  advance,
 }: {
   claim: Claim;
   error: string;
   final: FinalFailure | null;
   defaults: StepDefaults;
+  advance: AdvanceRun;
 }): Promise<{ recorded: boolean; retryInMs: number | null; failureReason: FailureReason | null }> {
   return db.transaction().execute(async (trx) => {
     await lockRun({ trx, runId: claim.runId });
@@ -853,15 +857,17 @@ async function failStep({
     if (!(await finishOwnedStep({ trx, claim, status: "failed", error, failureReason }))) {
       return { recorded: false, retryInMs: null, failureReason: null };
     }
-    await recordFinalFailure({
+    await emit({
       trx,
       runId: claim.runId,
+      type: "step_failed",
       stepName: claim.stepName,
       attempt: claim.attempt,
       workerId: claim.workerId,
-      error,
-      failureReason,
+      detail: { error, failureReason },
     });
+    const readied = await applyAdvance({ trx, runId: claim.runId, advance });
+    if (readied.length > 0) await enqueue({ trx, message: { type: "step_ready" } });
     return { recorded: true, retryInMs: null, failureReason };
   });
 }
@@ -880,8 +886,8 @@ async function extendLease(claim: Claim): Promise<boolean> {
 }
 
 /**
- * Makes running steps whose lease has expired ready again, or fails their run if
- * they have no attempts left. The attempt stays as it is, so the next claim bumps
+ * Makes running steps whose lease has expired ready again, or fails them for
+ * good if they have no attempts left and marks their run to be advanced. The attempt stays as it is, so the next claim bumps
  * it and the old worker's late result no longer matches.
  *
  * Expired steps are found without locking, then handled one by one, each in its
@@ -944,15 +950,17 @@ async function sweepExpiredLeases({ defaults }: { defaults: StepDefaults }): Pro
           })
           .where("id", "=", step.id)
           .execute();
-        await recordFinalFailure({
+        await emit({
           trx,
           runId: step.run_id,
+          type: "step_failed",
           stepName: step.name,
           attempt: step.attempt,
           workerId,
-          error,
-          failureReason: "lost_worker",
+          detail: { error, failureReason: "lost_worker" },
         });
+        // The run's code has to be told, and this process may not have it.
+        await markForAdvance({ trx, runId: step.run_id });
         return true;
       }
 
@@ -977,21 +985,22 @@ async function sweepExpiredLeases({ defaults }: { defaults: StepDefaults }): Pro
 }
 
 /**
- * Resumes a run that was cancelled or that failed for a redrivable reason:
- * every step that didn't succeed (a cancelled run's failed and skipped steps
- * too) goes back to pending with fresh attempts, and those whose needs have
- * succeeded become ready. Succeeded steps keep their outputs and never run
- * again. A run in a group takes a slot again like a new run: if the group is
- * full, it waits, and its steps become ready only when it is admitted. Returns
- * false, changing nothing, if the run can't be redriven.
+ * Resumes a run that was cancelled or that failed for a redrivable reason.
+ * Steps that succeeded keep their outputs and never run again. Every other step
+ * goes back to pending with fresh attempts, and becomes ready when the
+ * workflow's code asks for it again, which may be straight away or after the
+ * steps before it have run again. The run is marked to be advanced. A run in a
+ * group takes a slot again like a new run: if the group is full, it waits, and
+ * is marked only when it is admitted. Returns false, changing nothing, if the
+ * run can't be redriven.
  */
 async function redriveRun({ runId }: { runId: string }): Promise<boolean> {
   return db.transaction().execute(async (trx) => {
-    await lockRun({ trx, runId });
     const run = await trx
       .selectFrom("workflow_runs")
       .select(["status", "failure_reason", "concurrency_key"])
       .where("id", "=", runId)
+      .forNoKeyUpdate()
       .executeTakeFirst();
     if (!run || !canRedrive(run.status, run.failure_reason)) return false;
 
@@ -1018,13 +1027,12 @@ async function redriveRun({ runId }: { runId: string }): Promise<boolean> {
         .where("id", "=", runId)
         .execute();
       await emit({ trx, runId, type: "run_redriven" });
-      const ready = await readyUnblockedSteps({ trx, runId });
-      if (ready.length > 0) await enqueue({ trx, message: { type: "step_ready" } });
+      await markForAdvance({ trx, runId });
       return true;
     }
 
-    // It gave its slot back when it failed, so it needs one again. Admission
-    // readies its steps, and a worker's first claim makes it running.
+    // It gave its slot back when it finished, so it needs one again. Admission
+    // marks it to be advanced, and its first advance makes it running.
     await trx
       .updateTable("workflow_runs")
       .set({ status: "queued", failure_reason: null, finished_at: null, admitted_at: null })
@@ -1045,18 +1053,12 @@ async function redriveRun({ runId }: { runId: string }): Promise<boolean> {
  * Returns false, changing nothing, if the run doesn't exist or has finished.
  *
  * It takes the run's lock first, like everything that changes a run's steps,
- * so it can't interleave with a step finishing, failing or being swept. The
- * one thing that takes a step's lock before its run's is a run's first claim
- * (see takeStep), which never waits for the run, so the two can't deadlock.
+ * so it can't interleave with a step finishing, failing or being swept, or
+ * with an advance.
  */
 async function cancelRun({ runId }: { runId: string }): Promise<boolean> {
   return db.transaction().execute(async (trx) => {
     // Lock and read in one query: lockRun throws when the row is missing.
-    // FOR NO KEY UPDATE, not FOR UPDATE. It still conflicts with lockRun's FOR
-    // UPDATE, so every other change to the run's steps waits for the cancel, and
-    // with the SKIP LOCKED in takeStep. But it doesn't conflict with the FOR KEY
-    // SHARE that inserting an event takes on the run through its foreign key,
-    // which is what a claim does while it holds a step.
     const run = await trx
       .selectFrom("workflow_runs")
       .select(["finished_at", "concurrency_key"])
@@ -1065,53 +1067,16 @@ async function cancelRun({ runId }: { runId: string }): Promise<boolean> {
       .executeTakeFirst();
     if (!run || run.finished_at !== null) return false;
 
-    // One statement, deciding per row, never "skip the unstarted" and then "fail
-    // the running": a step could go from ready to running between the two and
-    // be left running in a finished run. When this has to wait for a step that
-    // a claim holds, Postgres re-reads the row once the claim commits and
-    // applies both the WHERE and the CASEs to the new version, so a step
-    // claimed in the meantime is correctly failed. In a SET, `status` on the
-    // right is the row's old value, which the CASEs rely on.
-    const steps = await trx
-      .updateTable("step_runs")
-      .set({
-        status: sql`CASE WHEN status = 'running' THEN 'failed'::step_run_status ELSE 'skipped'::step_run_status END`,
-        error: sql`CASE WHEN status = 'running' THEN 'Run cancelled' ELSE error END`,
-        failure_reason: sql`CASE WHEN status = 'running' THEN 'cancelled'::failure_reason ELSE NULL END`,
-        finished_at: sql<Date>`now()`,
-        lease_expires_at: null,
-      })
-      .where("run_id", "=", runId)
-      .where("status", "in", ["pending", "ready", "running"])
-      .returning(["name", "position", "status", "attempt", "worker_id"])
-      .execute();
-    steps.sort((a, b) => a.position - b.position);
-    for (const step of steps) {
-      if (step.status === "failed") {
-        await emit({
-          trx,
-          runId,
-          type: "step_failed",
-          stepName: step.name,
-          attempt: step.attempt,
-          workerId: step.worker_id ?? undefined,
-          detail: { error: "Run cancelled", failureReason: "cancelled" },
-        });
-      } else {
-        await emit({ trx, runId, type: "step_skipped", stepName: step.name });
-      }
-    }
+    const stoppedRunning = await stopSteps({ trx, runId, error: "Run cancelled" });
 
     await trx
       .updateTable("workflow_runs")
-      .set({ status: "cancelled", finished_at: sql<Date>`now()` })
+      .set({ status: "cancelled", finished_at: sql<Date>`now()`, advance_at: null })
       .where("id", "=", runId)
       .execute();
     await emit({ trx, runId, type: "run_cancelled" });
     // Only a worker running one of its steps has anything to do about it.
-    if (steps.some((step) => step.status === "failed")) {
-      await enqueue({ trx, message: { type: "run_cancelled", runId } });
-    }
+    if (stoppedRunning) await enqueue({ trx, message: { type: "run_cancelled", runId } });
 
     await giveUpSlot({ trx, key: run.concurrency_key });
     return true;
@@ -1507,6 +1472,7 @@ export function createPostgresStore(): WorkflowStore {
     setSchedulePaused,
     fireDueSchedules,
     relayMessages,
+    advanceRun,
     close: () => db.destroy(),
   };
 }

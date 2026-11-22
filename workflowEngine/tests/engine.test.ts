@@ -1,4 +1,4 @@
-import { startWorkers, stopWorkers, store, waitForFinish } from "./harness.ts";
+import { advanceAll, startWorkers, stopWorkers, store, waitForFinish } from "./harness.ts";
 
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
@@ -65,7 +65,7 @@ test("later steps receive the outputs of earlier steps", async () => {
   assert.deepEqual(last.output, { total: 3, idempotencyKey: `${runId}:third` });
 });
 
-test("a failed step fails the run and skips the steps after it", async () => {
+test("a failed step fails the run, and the steps after it are never asked for", async () => {
   const runId = await store.startRun({ definition: pipeline, input: { failAt: "second" } });
   await waitForFinish([runId]);
 
@@ -79,7 +79,6 @@ test("a failed step fails the run and skips the steps after it", async () => {
   assert.deepEqual(await stepStatuses(runId), [
     { name: "first", status: "succeeded" },
     { name: "second", status: "failed" },
-    { name: "third", status: "skipped" },
   ]);
 });
 
@@ -139,16 +138,16 @@ test("an engine rejects two workflows with the same name", () => {
   );
 });
 
-test("workers only claim steps from workflows they know", async () => {
+test("workers only work on workflows they know", async () => {
   const foreign = defineWorkflow({
     name: "foreign",
     version: "1",
-    steps: [{ name: "only", run: async () => null }],
+    run: (ctx) => ctx.step("only", () => null),
   });
   await store.syncWorkflows([foreign]);
   const runId = await store.startRun({ definition: foreign });
 
-  // The running workers only know the pipeline workflow.
+  // The running workers don't have this workflow, so they neither advance it nor claim from it.
   await sleep(300);
   const run = await db
     .selectFrom("workflow_runs")
@@ -156,7 +155,9 @@ test("workers only claim steps from workflows they know", async () => {
     .where("id", "=", runId)
     .executeTakeFirstOrThrow();
   assert.equal(run.status, "queued");
+  assert.deepEqual(await stepStatuses(runId), []);
 
+  await advanceAll([foreign]);
   const claim = await store.claimStep({
     workerId: "other-engine",
     workflows: [foreign],
@@ -166,61 +167,38 @@ test("workers only claim steps from workflows they know", async () => {
   assert.equal(claim?.runId, runId);
 });
 
-test("workers only claim runs of a workflow version they have", async () => {
-  // Same name, edited plan: like a run started by a newer deploy.
-  const edited = {
-    ...pipeline,
-    steps: pipeline.steps.map((step, i) => (i === 0 ? { ...step, leaseMs: 12_345 } : step)),
-  };
-  await store.syncWorkflows([edited]);
-  const runId = await store.startRun({ definition: edited });
-
-  // The running workers have the original pipeline, so they leave it alone.
-  await sleep(300);
-  const run = await db
-    .selectFrom("workflow_runs")
-    .select("status")
-    .where("id", "=", runId)
-    .executeTakeFirstOrThrow();
-  assert.equal(run.status, "queued");
-
-  const claim = await store.claimStep({
-    workerId: "newer-deploy",
-    workflows: [edited],
-    order: "fair",
-    defaults: { ...DEFAULT_ENGINE_SETTINGS, leaseMs: 30_000 },
-  });
-  assert.equal(claim?.runId, runId);
-  await db.deleteFrom("workflow_runs").where("id", "=", runId).execute();
-});
-
-test("editing a workflow leaves earlier runs on the version they started with", async () => {
-  /** Builds the same workflow with a different step lease, so it hashes to a new version. */
-  const version = (leaseMs: number) =>
+test("a new version of a workflow leaves earlier runs on the version they started with", async () => {
+  const version = (text: string) =>
     defineWorkflow({
       name: "versioned",
-      version: "1",
-      steps: [{ name: "only", leaseMs, run: async () => null }],
+      version: text,
+      run: (ctx) => ctx.step("only", () => text),
     });
-  /** The lease in the plan for a run's only step. */
-  const stepLeaseMs = (runId: string) =>
+  /** The version a run is on, by its own record and by the workflow row it points at. */
+  const versionOf = (runId: string) =>
     db
-      .selectFrom("step_runs as sr")
-      .innerJoin("steps as s", "s.id", "sr.step_id")
-      .select("s.lease_ms")
-      .where("sr.run_id", "=", runId)
+      .selectFrom("workflow_runs as r")
+      .innerJoin("workflows as w", "w.id", "r.workflow_id")
+      .select(["r.workflow_version", "w.version"])
+      .where("r.id", "=", runId)
       .executeTakeFirstOrThrow();
 
-  const before = version(1000);
+  const before = version("1");
   await store.syncWorkflows([before]);
   const oldRun = await store.startRun({ definition: before });
 
-  const edited = version(2000);
-  await store.syncWorkflows([edited]);
-  const newRun = await store.startRun({ definition: edited });
+  const after = version("2");
+  await store.syncWorkflows([after]);
+  const newRun = await store.startRun({ definition: after });
 
-  assert.equal((await stepLeaseMs(oldRun)).lease_ms, 1000);
-  assert.equal((await stepLeaseMs(newRun)).lease_ms, 2000);
+  assert.deepEqual(await versionOf(oldRun), { workflow_version: "1", version: "1" });
+  assert.deepEqual(await versionOf(newRun), { workflow_version: "2", version: "2" });
+
+  // Each run is advanced only by code of its own version.
+  await advanceAll([after]);
+  assert.deepEqual(await stepStatuses(oldRun), []);
+  assert.deepEqual(await stepStatuses(newRun), [{ name: "only", status: "ready" }]);
+  await db.deleteFrom("workflow_runs").where("id", "in", [oldRun, newRun]).execute();
 });
 
 test("engine.startRun starts a run by workflow name, and rejects a name it doesn't have", async () => {
@@ -256,16 +234,15 @@ test("engine.startRun starts a run by workflow name, and rejects a name it doesn
 });
 
 test("changing only a workflow's version makes a new version, which workers with the old one leave alone", async () => {
-  // Same plan, new version: like a deploy that changed what a step's code does.
+  // Same code, new version: like a deploy that changed what a step does.
   const bumped = { ...pipeline, version: "2" };
   await store.syncWorkflows([bumped]);
   const versions = await db
     .selectFrom("workflows")
-    .select(["version", "plan_hash"])
+    .select("version")
     .where("name", "=", pipeline.name)
     .execute();
-  assert.equal(new Set(versions.map((v) => v.plan_hash)).size, versions.length);
-  assert.ok(versions.some((v) => v.version === "2"));
+  assert.deepEqual(versions.map((v) => v.version).sort(), ["1", "2"]);
   const runId = await store.startRun({ definition: bumped });
   const started = await db
     .selectFrom("workflow_runs")
@@ -283,6 +260,7 @@ test("changing only a workflow's version makes a new version, which workers with
     .executeTakeFirstOrThrow();
   assert.equal(run.status, "queued");
 
+  await advanceAll([bumped]);
   const claim = await store.claimStep({
     workerId: "newer-deploy",
     workflows: [bumped],
@@ -298,10 +276,38 @@ test("defineWorkflow rejects a workflow without a version", () => {
     defineWorkflow({
       name: "unversioned",
       version: version as string,
-      steps: [{ name: "only", run: async () => null }],
+      run: (ctx) => ctx.step("only", () => null),
     });
   for (const version of [undefined, "", "  ", 2]) {
     assert.throws(() => define(version), /Workflow unversioned needs a version/);
   }
   assert.doesNotThrow(() => define("2"));
+});
+
+test("defineWorkflow rejects a workflow without a name or without code", () => {
+  const run = () => null;
+  assert.throws(() => defineWorkflow({ name: "", version: "1", run }), /A workflow needs a name/);
+  assert.throws(
+    () => defineWorkflow({ name: "no-code", version: "1", run: undefined as never }),
+    /Workflow no-code needs a run function/,
+  );
+  assert.throws(
+    () => defineWorkflow({ name: "old-style", version: "1", steps: [] } as never),
+    /Workflow old-style needs a run function/,
+  );
+});
+
+test("a run's output is what its workflow returned", async () => {
+  const runId = await store.startRun({ definition: pipeline });
+  await waitForFinish([runId]);
+
+  const run = await db
+    .selectFrom("workflow_runs")
+    .select(["status", "output"])
+    .where("id", "=", runId)
+    .executeTakeFirstOrThrow();
+  assert.deepEqual(run, {
+    status: "succeeded",
+    output: { total: 3, idempotencyKey: `${runId}:third` },
+  });
 });

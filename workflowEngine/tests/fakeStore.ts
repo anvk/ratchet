@@ -38,14 +38,13 @@ export function fakeStore({
       return {
         stepRunId: `step-run-${calls.claims}`,
         stepName: step,
-        position: 0,
         attempt: 1,
         leaseMs: 30_000,
         workerId,
         runId: "run",
         workflow,
         input: {},
-        outputs: {},
+        saved: { [step]: { status: "open" } },
       };
     },
     completeStep: async ({ output }) => {
@@ -82,6 +81,7 @@ export function fakeStore({
     },
     fireDueSchedules: async () => 0,
     relayMessages: async () => 0,
+    advanceRun: async () => false,
     close: async () => {
       calls.closed++;
     },

@@ -1,6 +1,25 @@
 import { setImmediate as nextTurn } from "node:timers/promises";
-import type { FailureReason } from "./workflowEngine.constants.ts";
 import { NonRetryableError, StepFailedError } from "./workflowEngine.errors.ts";
+import type {
+  AskedStep,
+  Decision,
+  ReplayRequest,
+  StepFunction,
+  StepOptions,
+  WorkflowContext,
+} from "./workflowEngine.types.ts";
+
+export type {
+  AskedStep,
+  Decision,
+  ReplayRequest,
+  SavedStep,
+  StepFunction,
+  StepOptions,
+  StepRunContext,
+  WorkflowContext,
+  WorkflowFunction,
+} from "./workflowEngine.types.ts";
 
 // Runs a workflow written as a function against the results its run has
 // already saved. Nothing here touches a store or a worker: it takes a plain
@@ -10,107 +29,6 @@ import { NonRetryableError, StepFailedError } from "./workflowEngine.errors.ts";
 // A workflow function is run again from the top each time. A step whose result
 // is saved hands that result back at once, without running, so the function
 // moves straight to the first thing it doesn't have yet.
-
-/** The settings a step may be given where the function asks for it. */
-export interface StepOptions {
-  /** How long a worker may go without a heartbeat before the step is given to another worker. */
-  leaseMs?: number;
-  /** How many times the step may run, counting the first. */
-  maxAttempts?: number;
-  /** The wait before the first retry, doubling for each one after it. */
-  backoffMs?: number;
-  /** How long one attempt may run. */
-  timeoutMs?: number;
-}
-
-/** What a step's function receives when it runs. */
-export interface StepRunContext {
-  runId: string;
-  stepName: string;
-  /** Starts at 1. */
-  attempt: number;
-  /** The same on every attempt of this step. Pass it to anything with side effects. */
-  idempotencyKey: string;
-  /** Fires when the result won't be used: the step was taken away, or it ran past its time limit. */
-  abortSignal: AbortSignal;
-}
-
-/** The code of one step. */
-export type StepFunction<Output = unknown> = (step: StepRunContext) => Promise<Output> | Output;
-
-/** What a workflow function receives. */
-export interface WorkflowContext<Input = unknown> {
-  runId: string;
-  /** The input the run was started with. */
-  input: Input;
-  /**
-   * Asks for a step. If the run has already saved this step's output, that
-   * output comes back and `fn` is not called. If the step failed for good, a
-   * StepFailedError is thrown here, which the function may catch. Otherwise
-   * the promise doesn't settle in this replay: the function waits here until
-   * it is run again with the step's result.
-   *
-   * A name may be used once in a run. Steps asked for without waiting in
-   * between, as in `Promise.all`, are all asked for together.
-   */
-  step<Output>(name: string, fn: StepFunction<Output>, options?: StepOptions): Promise<Output>;
-}
-
-/**
- * A workflow as code. It must take the same path every time it is run with the
- * same saved results, so it may only wait on `ctx`, and anything that can
- * differ between two runs (the clock, random numbers, anything outside the
- * process) belongs inside a step.
- */
-export type WorkflowFunction<Input = unknown, Output = unknown> = (
-  ctx: WorkflowContext<Input>,
-) => Promise<Output> | Output;
-
-/**
- * What a run has saved about one step: its output, why it failed for good, or
- * `open` for a step the function asked for that hasn't finished.
- */
-export type SavedStep =
-  | { status: "succeeded"; output: unknown }
-  | { status: "failed"; reason: FailureReason; error: string }
-  | { status: "open" };
-
-/** Why a replay ended a run in failure: a step's own reason, or one of the two a function can cause by itself. */
-export type ReplayFailureReason =
-  | FailureReason
-  /** The function didn't take the path the saved steps say it took before. */
-  | "nondeterministic"
-  /** The function threw an error of its own. */
-  | "workflow_error";
-
-/** A step a function asked for. */
-export interface AskedStep {
-  name: string;
-  options: StepOptions;
-}
-
-/**
- * What a workflow function did when run against what is saved.
- *
- * - `completed`: it returned.
- * - `failed`: it threw, or it broke one of the rules that replaying depends on.
- * - `parked`: it is waiting for steps that haven't finished. `requested` are
- *   the ones nothing is saved about yet, in the order it asked; `waitingOn` are
- *   all the unfinished steps it asked for, those included.
- */
-export type Decision =
-  | { kind: "completed"; output: unknown }
-  | { kind: "failed"; reason: ReplayFailureReason; error: string; step?: string }
-  | { kind: "parked"; requested: AskedStep[]; waitingOn: string[] };
-
-/** What a replay needs: the function, and the run it is being replayed for. */
-export interface ReplayRequest<Input = unknown> {
-  run: WorkflowFunction<Input>;
-  runId: string;
-  input: Input;
-  /** Everything the run has saved, by step name. */
-  steps: Record<string, SavedStep>;
-}
 
 /** A promise that never settles, for a step this replay has no result for. */
 const never = <T>() => new Promise<T>(() => {});
@@ -130,6 +48,7 @@ async function replay<Input>({
   const { run, runId, input, steps } = request;
   const asked = new Map<string, StepOptions>();
   const usedTwice = new Set<string>();
+  const invalid: string[] = [];
 
   const ctx: WorkflowContext<Input> = {
     runId,
@@ -142,6 +61,7 @@ async function replay<Input>({
         return never<Output>();
       }
       asked.set(name, options);
+      invalid.push(...problemsWith({ name, options }));
       onAsk?.({ name, fn, options });
 
       // Own-property check: a step may be named like something every object has.
@@ -176,7 +96,24 @@ async function replay<Input>({
   // something that isn't saved.
   await nextTurn();
 
-  return { asked, usedTwice, outcome };
+  return { asked, usedTwice, invalid, outcome };
+}
+
+/** What is wrong with a step's name or options, as messages. Empty if nothing is. */
+function problemsWith({ name, options }: { name: string; options: StepOptions }): string[] {
+  const problems: string[] = [];
+  if (typeof name !== "string" || name.trim() === "") problems.push("A step needs a name");
+  const wholeAndAtLeast = (value: number | undefined, least: number) =>
+    value === undefined || (Number.isInteger(value) && value >= least);
+  for (const key of ["leaseMs", "maxAttempts", "timeoutMs"] as const) {
+    if (!wholeAndAtLeast(options[key], 1)) {
+      problems.push(`Step ${name} needs a whole, positive ${key}`);
+    }
+  }
+  if (!wholeAndAtLeast(options.backoffMs, 0)) {
+    problems.push(`Step ${name} needs a whole backoffMs of 0 or more`);
+  }
+  return problems;
 }
 
 /**
@@ -192,11 +129,11 @@ async function replay<Input>({
  * - The function may only wait on `ctx`. One that is waiting while everything
  *   it asked for is saved is waiting on something a replay can't see.
  *
- * A step name used twice is the function's own mistake, and fails the run with
- * `workflow_error`.
+ * A step name used twice, or a step given options that make no sense, is the
+ * function's own mistake, and fails the run with `workflow_error`.
  */
 export async function advance<Input>(request: ReplayRequest<Input>): Promise<Decision> {
-  const { asked, usedTwice, outcome } = await replay({ request });
+  const { asked, usedTwice, invalid, outcome } = await replay({ request });
   const { steps } = request;
 
   if (usedTwice.size > 0) {
@@ -205,6 +142,9 @@ export async function advance<Input>(request: ReplayRequest<Input>): Promise<Dec
       reason: "workflow_error",
       error: `A step name was used more than once: ${[...usedTwice].join(", ")}`,
     };
+  }
+  if (invalid.length > 0) {
+    return { kind: "failed", reason: "workflow_error", error: invalid.join("; ") };
   }
 
   const notAskedAgain = Object.keys(steps).filter((name) => !asked.has(name));
@@ -241,13 +181,20 @@ export async function advance<Input>(request: ReplayRequest<Input>): Promise<Dec
       error: "The workflow is waiting on something that isn't a step",
     };
   }
-  return {
-    kind: "parked",
-    requested: unfinished
-      .filter((name) => !Object.hasOwn(steps, name))
-      .map((name) => ({ name, options: asked.get(name)! })),
-    waitingOn: unfinished,
-  };
+  const order = [...asked.keys()];
+  const requested: AskedStep[] = [];
+  for (const name of unfinished.filter((unsaved) => !Object.hasOwn(steps, unsaved))) {
+    requested.push({
+      name,
+      options: asked.get(name)!,
+      after: await straightAfter({
+        request,
+        step: name,
+        askedBefore: order.slice(0, order.indexOf(name)),
+      }),
+    });
+  }
+  return { kind: "parked", requested, waitingOn: unfinished };
 }
 
 /**
@@ -272,4 +219,55 @@ export async function locate<Input>({
     },
   });
   return found;
+}
+
+/**
+ * The steps a newly asked-for step comes straight after (see AskedStep.after).
+ *
+ * The function is run again once for each step that might count, with that
+ * step's result taken away: if it then no longer asks for the new step, the new
+ * step needed it. Candidates are tried latest first, and once one counts,
+ * everything it came after is known to count too, through it, and needn't be
+ * tried. So steps in a row cost one extra run each, however long the row.
+ */
+async function straightAfter<Input>({
+  request,
+  step,
+  askedBefore,
+}: {
+  request: ReplayRequest<Input>;
+  step: string;
+  /** Every step the function asked for before this one, in order. */
+  askedBefore: string[];
+}): Promise<string[]> {
+  const { steps, after = {} } = request;
+  const candidates = askedBefore
+    .filter((name) => Object.hasOwn(steps, name) && steps[name].status !== "open")
+    .reverse();
+
+  // Each step that counts, with what the function still asked for without it.
+  const needed = new Map<string, Set<string>>();
+  const throughAnother = new Set<string>();
+  const markBehind = (name: string) => {
+    for (const earlier of Object.hasOwn(after, name) ? after[name] : []) {
+      if (throughAnother.has(earlier)) continue;
+      throughAnother.add(earlier);
+      markBehind(earlier);
+    }
+  };
+  for (const candidate of candidates) {
+    if (throughAnother.has(candidate)) continue;
+    const without = await replay({
+      request: { ...request, steps: { ...steps, [candidate]: { status: "open" } } },
+    });
+    if (without.asked.has(step)) continue;
+    needed.set(candidate, new Set(without.asked.keys()));
+    markBehind(candidate);
+  }
+  // Where `after` didn't say so already: a step that another needed step itself
+  // needs is reached through that one, so it isn't straight before this step.
+  const names = [...needed.keys()];
+  return names
+    .filter((name) => !names.some((other) => other !== name && !needed.get(name)!.has(other)))
+    .reverse();
 }

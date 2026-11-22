@@ -1,17 +1,22 @@
 import type { WorkflowLabels } from "@ratchet/api/types";
-import { defineWorkflow, type StepDefinition, type WorkflowDefinition } from "@ratchet/engine";
+import { defineWorkflow, type WorkflowDefinition } from "@ratchet/engine";
 
 /** The text the dashboard shows for a workflow or one of its steps. */
 type Labelled = { title: string; description: string };
 
-/** A workflow definition whose workflow and steps also carry a title and description. */
-export type DescribedWorkflow<Input> = Omit<WorkflowDefinition<Input>, "steps"> &
-  Labelled & { steps: (StepDefinition<Input> & Labelled)[] };
+/**
+ * A workflow definition that also carries the text the dashboard shows: a title
+ * and description for the workflow, and for each step its code asks for, by the
+ * step's name.
+ */
+export type DescribedWorkflow<Input> = WorkflowDefinition<Input> &
+  Labelled & { steps: Record<string, Labelled> };
 
 /**
  * Defines a workflow for the engine and collects the text the dashboard shows
- * for it: the workflow's and each step's title and description. The definition
- * handed to the engine carries neither.
+ * for it. The definition handed to the engine carries none of it. The engine
+ * doesn't know these steps: they are labels for the names the workflow's code
+ * uses, and a step with no label is shown by its name.
  */
 export function describeWorkflow<Input = unknown>({
   title,
@@ -19,13 +24,8 @@ export function describeWorkflow<Input = unknown>({
   steps,
   ...workflow
 }: DescribedWorkflow<Input>): { definition: WorkflowDefinition<Input>; labels: WorkflowLabels } {
-  const stepLabels: WorkflowLabels["steps"] = {};
-  const engineSteps = steps.map(({ title, description, ...step }) => {
-    stepLabels[step.name] = { title, description };
-    return step;
-  });
   return {
-    definition: defineWorkflow<Input>({ ...workflow, steps: engineSteps }),
-    labels: { title, description, steps: stepLabels },
+    definition: defineWorkflow<Input>(workflow),
+    labels: { title, description, steps },
   };
 }

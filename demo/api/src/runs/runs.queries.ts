@@ -102,7 +102,7 @@ export async function getRun(id: string) {
       "s.name as schedule",
       "w.name as workflow",
       "r.workflow_version",
-      "w.plan_hash as workflow_plan_hash",
+      "r.output",
     ])
     .where("r.id", "=", id)
     .executeTakeFirst();
@@ -113,7 +113,7 @@ export async function getRun(id: string) {
     .select([
       "sr.name",
       "sr.position",
-      "sr.needs",
+      "sr.asked_after",
       "sr.status",
       "sr.attempt",
       "sr.worker_id",

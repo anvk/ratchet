@@ -3,21 +3,68 @@
 What the engine promises. Each guarantee is backed by a test in
 `workflowEngine/tests/`.
 
-The guarantees about recovering lost steps and about schedules are kept by the
-orchestrator, so they hold while at least one orchestrator is running. Workers
-only claim and run steps.
+A workflow is code: a function that asks for steps and returns the run's
+output. The guarantees about recovering lost steps and about schedules are kept
+by the orchestrator, so they hold while at least one orchestrator is running.
+Workers only run your code: the workflow's, to see what it asks for next, and
+the steps'.
+
+## Workflows as code
+
+- **A workflow is run again from the top, and a step that has finished never
+  runs again.** Each time something happens in a run, its code is run against
+  what the run has saved. A step whose output is saved hands it back at once,
+  so the code goes straight to the first thing it doesn't have yet.
+- **A step runs when the workflow asks for it.** A run has no steps until its
+  code asks. Steps asked for without waiting in between, as in `Promise.all`,
+  are asked for together and run side by side.
+- **A step that waits for several others is asked for exactly once,** even
+  when they finish at the same moment on different workers. What a run does
+  next is only ever decided with the run locked, from everything saved by
+  then, so one of the two finishing steps is seen second, with both results.
+- **A run lasts exactly as long as its workflow's code.** When the code
+  returns, the run succeeds with what it returned as its output. When it
+  throws, the run fails. Either way the run is over at once: a step it asked
+  for that hasn't started becomes `skipped`, and a step still running is failed
+  with reason `cancelled`, its worker told, and its late result rejected.
+- **A step that fails for good is thrown into the workflow, where it asked for
+  the step.** As a `StepFailedError`, with the step's reason and message. The
+  workflow may catch it and carry on, for example to undo earlier work. If it
+  doesn't, the run fails with that step's reason.
+- **An error in the workflow's own code fails the run.** With
+  `non_retryable` for a `NonRetryableError`, and `workflow_error` for anything
+  else.
+- **A workflow that takes a different path than before fails its run, it
+  doesn't quietly do something else.** If the code doesn't ask again for a step
+  the run has saved, or waits on something that isn't a step, the run fails
+  with `nondeterministic`. That happens when the code changed under the run
+  without a new `version`, or decides on something that isn't saved.
+- **A step name is used once in a run, and a step's settings must make sense.**
+  Otherwise the run fails with `workflow_error`.
+- **A step is found by running the workflow up to it.** A worker that claims a
+  step runs the workflow's code, with the results saved when it claimed, until
+  the code asks for that step, and runs the function given there. If the code
+  never asks, the step fails with `unknown_step`.
+- **A step's settings come from where the workflow asks for it.** `leaseMs`,
+  `maxAttempts`, `backoffMs` and `timeoutMs`, each falling back to the engine's.
+- **Only a worker with a run's version runs its code.** That includes working
+  out what it does next, not only running its steps.
+- **A step records the steps it came straight after:** those whose results the
+  workflow needed before it asked for this one. It is for showing a run, and
+  decides nothing.
+
+## Steps, runs, schedules and messages
 
 - **One worker holds a step at a time.** Competing workers never claim the same
   step at once.
-- **A worker only runs steps it has the same code for.** A run belongs to the
-  workflow version it started on, and workers only claim runs of versions they
-  have. During a deploy, old workers finish old runs and new workers take new
-  ones.
-- **A workflow gets a new version when its plan or its `version` changes.** The
-  plan is its steps' names, needs, leases and retries. `version` is text every
-  workflow must give, for the changes the engine can't see: changing it when a
-  step's code changes keeps workers with the old code and the new from sharing
-  a run.
+- **A worker only works on runs it has the same code for.** A run belongs to
+  the workflow version it started on, and workers only claim steps, and only
+  advance runs, of versions they have. During a deploy, old workers finish old
+  runs and new workers take new ones.
+- **A workflow gets a new version when its `version` changes, and only then.**
+  `version` is text every workflow must give. The engine can't see inside the
+  code, so changing it is how you keep workers with old code and workers with
+  new from sharing a run.
 - **A run records the version it started on.** Its `workflow_version` is the
   definition's `version` at that moment and never changes, whatever is
   deployed later. That goes for runs a schedule starts too.
@@ -25,21 +72,14 @@ only claim and run steps.
   which the worker renews with heartbeats while the step runs. When a lease
   expires (the worker crashed, froze or lost its connection), the orchestrator
   makes the step ready, and the next claim is a new attempt. So steps run **at
-  least once**: anything with side effects should use `ctx.idempotencyKey`.
-- **A step that lost its lease can't finish it.** Its renewals fail, `ctx.signal`
-  fires, and its late result is rejected, because the step's worker and attempt
-  no longer match.
+  least once**: anything with side effects should use the step's
+  `idempotencyKey`.
+- **A step that lost its lease can't finish it.** Its renewals fail, its
+  `abortSignal` fires, and its late result is rejected, because the step's
+  worker and attempt no longer match.
 - **A step's lease is its own `leaseMs`, or the engine's default.** This holds
   for every claim, including the sticky handoff to the next step.
-- **A step starts only once everything it needs has succeeded.** Its `needs`,
-  or the step listed before it. Steps whose needs are met run side by side.
-- **A step that needs several others is readied exactly once,** even when they
-  finish at the same moment on different workers: every change to a started
-  run's steps locks the run first, so they take turns.
-- **A step only sees the outputs of steps it depends on,** directly or through
-  others, never those of a step running alongside it.
-- **A step can only need steps listed before it,** so a workflow can't have
-  unknown names or loops; `defineWorkflow` rejects them.
+
 - **A failed step is retried, from where it failed.** A step that throws runs
   again after a backoff (`backoffMs`, doubling each time, capped at
   `maxBackoffMs`, spread by up to 20%), while it has attempts left. Steps that
@@ -53,34 +93,34 @@ only claim and run steps.
   keeps crashing its worker stops too.
 - **Every step attempt has a time limit.** The step's own `timeoutMs`, or the
   engine's, which has no default: an engine can't be created without one. When
-  the limit passes, the worker fires `ctx.signal`, stops waiting for the step,
-  and records a failed attempt, which is retried like any other error while
-  attempts are left.
-- **A step that fails for good only stops what depends on it.** Steps that
-  depend on it, directly or not, become `skipped`. Every other step carries
-  on: running steps finish and ready steps still start. Once nothing can move,
-  the run becomes `failed`, with the reason of the step that failed first.
+  the limit passes, the worker fires the step's `abortSignal`, stops waiting
+  for the step, and records a failed attempt, which is retried like any other
+  error while attempts are left.
+
 - **A failed run can be resumed if a fix could cure it.** Redriving a run that
-  failed with `attempts_exhausted`, `lost_worker` or `unknown_step` reruns the
-  steps that didn't succeed, with fresh attempts; steps that succeeded keep
-  their outputs. Attempt numbers keep counting up, so a worker from before
-  can't save over a new attempt. `non_retryable` runs can't be redriven.
-- **A run can be cancelled until it finishes.** Steps that haven't started
-  become `skipped`; a running step fails with reason `cancelled` and its late
+  failed with `attempts_exhausted`, `lost_worker`, `unknown_step`,
+  `workflow_error` or `nondeterministic` runs its workflow again from the top.
+  Steps that succeeded keep their outputs and don't run again. Every other step
+  goes back to `pending`, and runs again, with fresh attempts, when the
+  workflow asks for it. Attempt numbers keep counting up, so a worker from
+  before can't save over a new attempt. `non_retryable` runs can't be redriven.
+- **A run can be cancelled until it finishes.** A step that hasn't started
+  becomes `skipped`; a running step fails with reason `cancelled` and its late
   result is rejected; the run becomes `cancelled`, not `failed`, and gives up
   its concurrency slot. Cancelling takes the run's lock and changes every step in
   one statement, so it can't miss a step that is being claimed. A cancelled run
   can be resumed with a redrive.
 - **Every failed step and run records why.** `failure_reason` is set exactly
   when the status is `failed` (a database check enforces it): `non_retryable`,
-  `attempts_exhausted`, `lost_worker`, `unknown_step` or `cancelled`. On a step,
-  `cancelled` means it was running when its run was cancelled; the run itself
-  is `cancelled` with no failure reason.
+  `attempts_exhausted`, `lost_worker`, `unknown_step`, `cancelled`,
+  `workflow_error` or `nondeterministic`. On a step, `cancelled` means it was
+  running when its run was cancelled, or when its workflow finished without
+  it; a cancelled run itself is `cancelled` with no failure reason.
 - **A concurrency group never runs more than its limit at once.** At most
   `limit` runs with the same concurrency key are in progress; a run is in
   progress from when it is admitted until it finishes (succeeded, failed or
-  cancelled). The others wait with no step ready, and are admitted oldest first as slots free
-  up. A run that fails or is redriven goes through the same admission. Counting
+  cancelled). The others wait, with their code not yet run and so no steps,
+  and are admitted oldest first as slots free up. A run that fails or is redriven goes through the same admission. Counting
   the slots and admitting a run happen under one lock per key, so two runs can't
   take the same slot.
 - **Schedules are created and changed through the engine, and survive restarts
@@ -121,7 +161,7 @@ only claim and run steps.
   difference is that it holds back its schedule's next tick until it finishes.
 - **A repeated key starts one run.** Starting a run with an idempotency key the
   caller already used returns the existing run.
-- **Each step has a stable key.** `ctx.idempotencyKey` is the same on every
+- **Each step has a stable key.** Its `idempotencyKey` is the same on every
   attempt of a step.
 - **A message is saved with the change it is about.** Making a step claimable
   saves a `step_ready` message, and cancelling a run with a running step saves
@@ -168,13 +208,16 @@ only claim and run steps.
 - **A retry repeats whatever the failed attempt already did.** If a step wrote
   something and then failed (or its reply was lost), the retry writes it again,
   unless the step makes its side effects safe to repeat, for example with a
-  unique key or `ctx.idempotencyKey`.
-- **A timed-out step's function isn't stopped.** Unless it honours `ctx.signal`
-  it keeps running in the background, and may overlap with its own retry.
-- **A cancelled step's function isn't stopped.** Its worker hears within
-  moments when a `run_cancelled` message reaches it, and otherwise at its next
-  heartbeat, up to a third of its lease later. Unless the function honours
-  `ctx.signal` it keeps running until it returns, and its result is discarded.
+  unique key or the step's `idempotencyKey`.
+- **A timed-out step's function isn't stopped.** Unless it honours its
+  `abortSignal` it keeps running in the background, and may overlap with its
+  own retry.
+- **A stopped step's function isn't stopped.** A step that was running when
+  its run was cancelled, or when its workflow finished without it, is failed
+  in the database at once. Its worker hears within moments when a
+  `run_cancelled` message reaches it, and otherwise at its next heartbeat, up
+  to a third of its lease later. Unless the function honours its `abortSignal`
+  it keeps running until it returns, and its result is discarded.
 - **With the Postgres message broker, work is slow while no orchestrator is
   running.** Only the orchestrator tells workers when there is work, so without
   one they look just once every `everyMs`. When one returns it sends what is
@@ -184,18 +227,34 @@ only claim and run steps.
 - **The Postgres message broker needs a direct connection to listen on.** A
   pooler that hands out connections per transaction can't deliver
   notifications.
-- **A failed run ends only when its last running step does,** since steps
-  that don't depend on the failure finish first.
-- **The engine can't tell when a step's code changes.** A workflow gets a new
-  version when its plan or its `version` changes. If you edit the code inside
-  a step's `run` and leave `version` as it was, workers with either code claim
-  the same runs.
+- **A workflow has rules it must keep.** It may only wait on `ctx`, and it
+  must take the same path every time it is run with the same saved results, so
+  the clock, random numbers and anything outside the process belong inside a
+  step. Breaking them fails the run with `nondeterministic` where the engine
+  can tell, which is not always.
+- **`Promise.race` over steps isn't supported.** Which step wins depends on
+  which finished first, and that isn't saved: the next time the workflow runs,
+  with both finished, the race picks the first one listed. The run fails with
+  `nondeterministic` if that changes its path.
+- **A workflow's later steps aren't known until it asks for them.** A run can
+  show what it has done, not what it will do.
+- **Every step asks the workflow's code to be run again.** A worker runs it
+  once to find a step and once to see what comes next, so the work grows with
+  the number of steps a run has saved. It is quick (about a fifth of a
+  millisecond with a thousand saved steps), but a run isn't meant to have
+  hundreds of thousands of steps.
+- **A step's output must survive being saved as JSON.** The workflow gets back
+  what was saved, so `undefined` comes back as `null` and a `Date` as text.
+- **The engine can't tell when a workflow's code changes.** A workflow gets a
+  new version only when its `version` changes. If you edit the code and leave
+  `version` as it was, workers with either code work on the same runs, and a
+  run in progress carries on with the new code.
 - **A step that blocks the event loop for longer than its lease loses it,**
   because heartbeats can't run. Give heavy synchronous steps a longer `leaseMs`.
 - **A run that never finishes keeps its concurrency slot.** If no worker can
-  claim its steps (for example, no worker has its version), it stays in
-  progress, and the runs waiting behind it in its group wait too, until someone
-  cancels it.
+  work on it (for example, no worker has its version), it stays in progress,
+  and the runs waiting behind it in its group wait too, until someone cancels
+  it.
 - **A new database has no schedules.** They live only in the database, so
   something has to create them.
 - **Schedule times are UTC and to the minute,** and a run starts up to

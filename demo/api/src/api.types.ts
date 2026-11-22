@@ -43,6 +43,10 @@ export interface WorkflowInfo {
   description: string | null;
   /** Empty if the app gave none for this workflow. */
   presets: Preset[];
+  /**
+   * The steps the app's labels name for this workflow. A workflow is code, so
+   * this is not a list of what a run will do: a run asks for steps as it goes.
+   */
   steps: { name: string; title: string; description: string | null }[];
 }
 
@@ -70,6 +74,7 @@ export interface RunSummary {
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+  /** How many steps the run has asked for so far. It grows as the run goes. */
   steps_total: number;
   steps_done: number;
   /**
@@ -149,9 +154,13 @@ export interface Step {
   title: string;
   /** Null if the app's labels have none for this step. */
   description: string | null;
+  /** The order in which the workflow asked for its steps. */
   position: number;
-  /** Steps that must succeed before this one starts. */
-  needs: string[];
+  /**
+   * The steps this one came straight after: the workflow needed their results
+   * before it asked for this one. Steps with the same ones ran side by side.
+   */
+  asked_after: string[];
   status: StepRunStatus;
   attempt: number;
   worker_id: string | null;
@@ -170,8 +179,8 @@ export interface RunDetail {
     input: unknown;
     /** The `version` the workflow's definition had when the run started. */
     workflow_version: string;
-    /** Identifies the exact plan the run started on. It changes when the steps do, even if the version doesn't. */
-    workflow_plan_hash: string;
+    /** What the workflow returned. Null unless the run succeeded. */
+    output: unknown;
     workflow_description: string | null;
   };
   steps: Step[];

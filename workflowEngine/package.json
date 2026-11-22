@@ -10,7 +10,7 @@
     "./utils": "./src/workflowEngine.utils.ts"
   },
   "scripts": {
-    "db:types": "kysely-codegen --env-file ../.env --include-pattern 'public.{workflows,steps,schedules,workflow_runs,step_runs,events,outbox}' --out-file src/stores/postgres/db/schema.gen.ts",
+    "db:types": "kysely-codegen --env-file ../.env --include-pattern 'public.{workflows,schedules,workflow_runs,step_runs,events,outbox}' --out-file src/stores/postgres/db/schema.gen.ts",
     "test": "node --env-file=../.env --import tsx --test --test-concurrency=1 tests/*.test.ts",
     "typecheck": "tsc --noEmit"
   },

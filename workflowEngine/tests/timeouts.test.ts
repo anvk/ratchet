@@ -7,7 +7,7 @@ import {
   createWorkflowEngine,
   createPollingMessageBroker,
   defineWorkflow,
-  type StepDefinition,
+  type StepFunction,
 } from "../src/index.ts";
 import { db } from "../src/stores/postgres/index.ts";
 import { fakeStore } from "./fakeStore.ts";
@@ -22,8 +22,17 @@ after(() => stopWorkers());
  * Runs a one-step workflow once on a worker over a fake store, and returns what
  * the store saw. `engineTimeoutMs` is the engine's setting, for steps without their own.
  */
-async function runOnce(step: Omit<StepDefinition, "name">, engineTimeoutMs = 60_000) {
-  const wf = defineWorkflow({ name: "timed", version: "1", steps: [{ name: "timed", ...step }] });
+async function runOnce(step: { timeoutMs?: number; run: StepFunction }, engineTimeoutMs = 60_000) {
+  const wf = defineWorkflow({
+    name: "timed",
+    version: "1",
+    run: (ctx) =>
+      ctx.step(
+        "timed",
+        step.run,
+        step.timeoutMs === undefined ? {} : { timeoutMs: step.timeoutMs },
+      ),
+  });
   const { store: fake, calls } = fakeStore({ workflow: "timed" });
   const engine = createWorkflowEngine({
     messageBroker: createPollingMessageBroker({ everyMs: 5 }),
@@ -51,7 +60,7 @@ const aborted = (signal: AbortSignal) =>
 test("a step that runs past its timeout fails that attempt", async () => {
   const { engine, worker, calls } = await runOnce({
     timeoutMs: 50,
-    run: (ctx) => aborted(ctx.signal),
+    run: (ctx) => aborted(ctx.abortSignal),
   });
   await until(() => calls.failures.length > 0);
   await engine.close();
@@ -60,12 +69,12 @@ test("a step that runs past its timeout fails that attempt", async () => {
   assert.equal(calls.completed, 0);
 });
 
-test("the timeout fires ctx.signal", async () => {
+test("the timeout fires ctx.abortSignal", async () => {
   let signalAborted = false;
   const { engine, worker, calls } = await runOnce({
     timeoutMs: 50,
     async run(ctx) {
-      await aborted(ctx.signal);
+      await aborted(ctx.abortSignal);
       signalAborted = true;
     },
   });
@@ -124,7 +133,7 @@ test("what a timed-out step throws later doesn't crash the worker", async () => 
 });
 
 test("a step without its own timeout gets the engine's", async () => {
-  const { engine, worker, calls } = await runOnce({ run: (ctx) => aborted(ctx.signal) }, 50);
+  const { engine, worker, calls } = await runOnce({ run: (ctx) => aborted(ctx.abortSignal) }, 50);
   await until(() => calls.failures.length > 0);
   await engine.close();
   await worker;
@@ -202,44 +211,66 @@ test("a step that always times out runs out of attempts", async () => {
   assert.equal(step.attempt, 3);
 });
 
-test("defineWorkflow rejects a timeoutMs that isn't a whole, positive number", () => {
-  const define = (timeoutMs: number) =>
-    defineWorkflow({
-      name: "timeout-bad",
-      version: "1",
-      steps: [{ name: "only", timeoutMs, run: async () => null }],
-    });
-  for (const timeoutMs of [0, -1, 1.5]) {
-    assert.throws(() => define(timeoutMs), /needs a whole, positive timeoutMs/);
-  }
-  for (const timeoutMs of [1, 5000]) {
-    assert.doesNotThrow(() => define(timeoutMs));
+test("a step asked for with a timeoutMs that isn't a whole, positive number fails its run", async () => {
+  const bad = defineWorkflow<{ timeoutMs: number }>({
+    name: "timeout-bad",
+    version: "1",
+    run: (ctx) => ctx.step("only", () => null, { timeoutMs: ctx.input.timeoutMs }),
+  });
+  const engine = createWorkflowEngine({
+    messageBroker: createPollingMessageBroker({ everyMs: 5 }),
+    workflows: [bad],
+    store: { ...store, close: async () => {} },
+    settings: { timeoutMs: 60_000 },
+  });
+  await engine.sync();
+  const worker = engine.runWorker({ workerId: "timeout-bad" });
+  try {
+    for (const timeoutMs of [0, -1, 1.5]) {
+      const runId = await engine.startRun({ workflow: "timeout-bad", input: { timeoutMs } });
+      await waitForFinish([runId]);
+      const run = await db
+        .selectFrom("workflow_runs")
+        .select(["status", "failure_reason"])
+        .where("id", "=", runId)
+        .executeTakeFirstOrThrow();
+      assert.deepEqual(run, { status: "failed", failure_reason: "workflow_error" });
+    }
+    const runId = await engine.startRun({ workflow: "timeout-bad", input: { timeoutMs: 5000 } });
+    await waitForFinish([runId]);
+    const run = await db
+      .selectFrom("workflow_runs")
+      .select("status")
+      .where("id", "=", runId)
+      .executeTakeFirstOrThrow();
+    assert.equal(run.status, "succeeded");
+  } finally {
+    await engine.close();
+    await worker;
   }
 });
 
-test("changing a step's timeoutMs does not create a new version", async () => {
-  const withTimeout = (timeoutMs: number) =>
+test("changing what a step is asked for with does not create a new version; changing `version` does", async () => {
+  const define = ({ timeoutMs, version }: { timeoutMs: number; version: string }) =>
     defineWorkflow({
       name: "timeout-versioned",
-      version: "1",
-      steps: [{ name: "only", timeoutMs, run: async () => null }],
+      version,
+      run: (ctx) => ctx.step("only", () => null, { timeoutMs }),
     });
-  await createWorkflowEngine({
-    messageBroker: createPollingMessageBroker(),
-    workflows: [withTimeout(1000)],
-    store,
-    settings: { timeoutMs: 60_000 },
-  }).sync();
-  await createWorkflowEngine({
-    messageBroker: createPollingMessageBroker(),
-    workflows: [withTimeout(2000)],
-    store,
-    settings: { timeoutMs: 60_000 },
-  }).sync();
-  const versions = await db
-    .selectFrom("workflows")
-    .select("id")
-    .where("name", "=", "timeout-versioned")
-    .execute();
-  assert.equal(versions.length, 1);
+  const sync = (workflow: ReturnType<typeof define>) =>
+    createWorkflowEngine({
+      messageBroker: createPollingMessageBroker(),
+      workflows: [workflow],
+      store,
+      settings: { timeoutMs: 60_000 },
+    }).sync();
+  const versions = () =>
+    db.selectFrom("workflows").select("id").where("name", "=", "timeout-versioned").execute();
+
+  await sync(define({ timeoutMs: 1000, version: "1" }));
+  await sync(define({ timeoutMs: 2000, version: "1" }));
+  assert.equal((await versions()).length, 1);
+
+  await sync(define({ timeoutMs: 2000, version: "2" }));
+  assert.equal((await versions()).length, 2);
 });

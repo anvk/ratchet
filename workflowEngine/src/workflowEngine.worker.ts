@@ -2,7 +2,9 @@ import { once } from "node:events";
 import { hostname } from "node:os";
 import { setTimeout as sleep } from "node:timers/promises";
 import { NonRetryableError } from "./workflowEngine.errors.ts";
+import { locate, type StepRunContext } from "./workflowEngine.replay.ts";
 import type {
+  AdvanceRun,
   Claim,
   MessageBroker,
   Registry,
@@ -66,11 +68,14 @@ function startTimeout(timeoutMs: number) {
 
 /**
  * Runs one claimed step, sending heartbeats while it runs, and records whether
- * it succeeded or failed. A NonRetryableError fails it for good; any other
+ * it succeeded or failed. The step's code is found by running the workflow up
+ * to where it asks for this step, with the results the run had saved when the
+ * step was claimed. A NonRetryableError fails the step for good; any other
  * error is retried while it has attempts left. An attempt that runs past
  * `timeoutMs` (the step's own, or the engine's) is no longer waited for: its
- * signal fires and the attempt fails like a thrown error. Returns the run's next step if the store handed it
- * straight to this worker.
+ * signal fires and the attempt fails like a thrown error. Either way the run is
+ * advanced as the result is recorded. Returns the run's next step if the store
+ * handed it straight to this worker.
  */
 async function executeStep({
   registry,
@@ -81,6 +86,7 @@ async function executeStep({
   defaults,
   defaultTimeoutMs,
   running,
+  advance,
 }: {
   registry: Registry;
   store: WorkflowStore;
@@ -92,21 +98,33 @@ async function executeStep({
   defaultTimeoutMs: number;
   /** Set to this step while its function runs, and cleared after. */
   running: { step: RunningStep | null };
+  advance: AdvanceRun;
 }): Promise<Claim | null> {
-  const step = registry.get(claim.workflow)?.steps.find((s) => s.name === claim.stepName);
+  // A worker only claims runs of workflows it has, at the version it has.
+  const definition = registry.get(claim.workflow)!;
+  const step = await locate({
+    request: {
+      run: definition.run,
+      runId: claim.runId,
+      input: claim.input,
+      steps: claim.saved,
+    },
+    step: claim.stepName,
+  });
   if (!step) {
-    // Retrying can't help: this code has no such step.
+    // Retrying can't help: this code doesn't ask for the step on the path the run has taken.
     await store.failStep({
       claim,
-      error: `This worker does not know step ${claim.workflow}/${claim.stepName}`,
+      error: `The code of ${claim.workflow} never asked for step ${claim.stepName}`,
       final: "unknown_step",
       defaults,
+      advance,
     });
     return null;
   }
 
   const heartbeat = startHeartbeat({ store, workerId, claim });
-  const timeoutMs = step.timeoutMs ?? defaultTimeoutMs;
+  const timeoutMs = step.options.timeoutMs ?? defaultTimeoutMs;
   const timeout = startTimeout(timeoutMs);
   running.step = { runId: claim.runId, checkOwnership: heartbeat.beat };
   /** Called once the step's function is no longer waited for. */
@@ -118,17 +136,16 @@ async function executeStep({
   let output: unknown;
   try {
     // Wrapped, so a step that returns a plain value instead of a promise still works.
-    const attempt = Promise.resolve(
-      step.run({
-        runId: claim.runId,
-        stepName: claim.stepName,
-        attempt: claim.attempt,
-        input: claim.input,
-        outputs: claim.outputs,
-        idempotencyKey: `${claim.runId}:${claim.stepName}`,
-        signal: AbortSignal.any([heartbeat.signal, timeout.signal]),
-      }),
-    );
+    const stepContext: StepRunContext = {
+      runId: claim.runId,
+      stepName: claim.stepName,
+      attempt: claim.attempt,
+      idempotencyKey: `${claim.runId}:${claim.stepName}`,
+      abortSignal: AbortSignal.any([heartbeat.signal, timeout.signal]),
+    };
+    // Through a promise, so a step that throws before its first await, or
+    // returns a plain value, is treated like any other.
+    const attempt = Promise.resolve().then(() => step.fn(stepContext));
     // A timed-out attempt is no longer waited for, so nothing else would catch
     // what it throws later.
     attempt.catch(() => {});
@@ -148,6 +165,7 @@ async function executeStep({
       error: message,
       final: err instanceof NonRetryableError ? "non_retryable" : null,
       defaults,
+      advance,
     });
     if (!recorded) logRejected({ workerId, claim });
     else if (failureReason) {
@@ -166,6 +184,7 @@ async function executeStep({
     output,
     claimNext,
     defaults,
+    advance,
   });
   if (completed) console.log(`[${workerId}] ${claim.stepName} succeeded`);
   else logRejected({ workerId, claim });
@@ -180,8 +199,9 @@ function logRejected({ workerId, claim }: { workerId: string; claim: Claim }) {
 }
 
 /**
- * Claims and runs steps one at a time until stopSignal fires, finishing the
- * current step. When there is nothing to claim it waits for a `step_ready`
+ * Does a worker's two jobs, one at a time, until stopSignal fires, finishing
+ * the step it is on: advancing runs that are marked for it, and claiming and
+ * running steps. When there is neither it waits for a `step_ready`
  * message, however long that takes: it has no timer of its own, so the message
  * broker decides how often it looks. A `run_cancelled` message for the run it
  * is working on makes it ask the store at once whether it still owns the step.
@@ -191,6 +211,7 @@ export async function runWorker({
   store,
   messageBroker,
   settings,
+  advance,
   stopSignal,
   workerId = `${hostname()}-${process.pid}`,
 }: {
@@ -198,6 +219,8 @@ export async function runWorker({
   store: WorkflowStore;
   messageBroker: MessageBroker;
   settings: WorkflowEngineSettings;
+  /** Runs a run's workflow code. See AdvanceRun. */
+  advance: AdvanceRun;
   stopSignal: AbortSignal;
   workerId?: string;
 }) {
@@ -228,6 +251,8 @@ export async function runWorker({
   while (!stopSignal.aborted) {
     try {
       wake = new AbortController();
+      // Advancing comes first: it is quick, and it is what makes steps claimable.
+      if (await store.advanceRun({ workflows, advance })) continue;
       let claim = await store.claimStep({
         workerId,
         workflows,
@@ -250,6 +275,7 @@ export async function runWorker({
           defaults,
           defaultTimeoutMs: settings.timeoutMs,
           running,
+          advance,
         });
       }
     } catch (err) {

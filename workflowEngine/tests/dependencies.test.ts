@@ -2,7 +2,6 @@ import { startWorkers, stopWorkers, store, waitForFinish } from "./harness.ts";
 
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
-import { defineWorkflow } from "../src/index.ts";
 import { db } from "../src/stores/postgres/index.ts";
 import { diamond } from "./fixtures/workflows.ts";
 
@@ -13,7 +12,16 @@ after(() => stopWorkers());
 async function stepsOf(runId: string) {
   const rows = await db
     .selectFrom("step_runs")
-    .select(["name", "status", "output", "attempt", "started_at", "finished_at"])
+    .select([
+      "name",
+      "status",
+      "output",
+      "attempt",
+      "started_at",
+      "finished_at",
+      "failure_reason",
+      "asked_after",
+    ])
     .where("run_id", "=", runId)
     .execute();
   return Object.fromEntries(rows.map((row) => [row.name, row]));
@@ -31,10 +39,11 @@ async function claimsOf(runId: string, stepName: string) {
   return rows.length;
 }
 
-test("branches run side by side, and the join runs once when both are done", async () => {
+test("steps asked for together run side by side, and the step after both runs once", async () => {
   // Three runs at a time, so each run's two branches get a free worker each,
-  // start together and finish together, racing to ready the join. Without the
-  // run lock, some joins never start.
+  // start together and finish together, each advancing the run as it finishes.
+  // Without the run lock, both could advance from a state that lacks the
+  // other's result, and the join would never be asked for.
   const runIds: string[] = [];
   for (let batch = 0; batch < 40; batch++) {
     const ids = await Promise.all(
@@ -48,7 +57,7 @@ test("branches run side by side, and the join runs once when both are done", asy
   for (const runId of runIds) {
     const steps = await stepsOf(runId);
     assert.equal(steps.join.status, "succeeded");
-    assert.equal(await claimsOf(runId, "join"), 1, "the join is readied exactly once");
+    assert.equal(await claimsOf(runId, "join"), 1, "the join is asked for exactly once");
     const { left, right } = steps;
     if (left.started_at! < right.finished_at! && right.started_at! < left.finished_at!) {
       overlapping++;
@@ -65,7 +74,7 @@ test("branches run side by side, and the join runs once when both are done", asy
   assert.equal(run.length, 0);
 });
 
-test("a step sees the outputs of everything it depends on, but not of a parallel branch", async () => {
+test("every step of a run finishes with what its code returned", async () => {
   const runId = await store.startRun({ definition: diamond });
   await waitForFinish([runId]);
 
@@ -76,48 +85,85 @@ test("a step sees the outputs of everything it depends on, but not of a parallel
   assert.deepEqual(steps.tail.output, { seen: ["right", "start"] });
 });
 
-test("a failed branch only stops what depends on it: the rest of the run carries on", async () => {
-  // left fails after 300ms; right takes a second, then tail (which only needs right) runs.
+test("a step records the steps it was asked for after", async () => {
+  const runId = await store.startRun({ definition: diamond });
+  await waitForFinish([runId]);
+
+  const steps = await stepsOf(runId);
+  assert.deepEqual(steps.start.asked_after, []);
+  assert.deepEqual(steps.left.asked_after, ["start"]);
+  assert.deepEqual(steps.right.asked_after, ["start"]);
+  // Not "left", even when left had finished too: the tail doesn't wait for it.
+  // And not "start" as well: right already comes after it.
+  assert.deepEqual(steps.tail.asked_after, ["right"]);
+  // Not the tail, even if the tail had finished by then.
+  assert.deepEqual(steps.join.asked_after, ["left", "right"]);
+});
+
+test("when a step fails and the workflow doesn't catch it, the run fails at once and a step still running is stopped", async () => {
+  // left fails after 300ms, while right would take another two seconds.
   const runId = await store.startRun({
     definition: diamond,
-    input: { failBranch: "left", branchMs: 300, survivorMs: 1_000 },
+    input: { failBranch: "left", branchMs: 300, survivorMs: 2_500 },
   });
   await waitForFinish([runId]);
 
   const steps = await stepsOf(runId);
   assert.equal(steps.left.status, "failed");
-  assert.equal(steps.right.status, "succeeded", "a branch that doesn't need left finishes");
-  assert.equal(steps.tail.status, "succeeded", "and steps after it still start");
-  assert.ok(steps.tail.started_at! > steps.left.finished_at!, "tail started after left failed");
-  assert.equal(steps.join.status, "skipped", "join needs left, so it can never run");
+  assert.equal(steps.left.failure_reason, "non_retryable");
+  assert.equal(steps.right.status, "failed", "the step still running is stopped");
+  assert.equal(steps.right.failure_reason, "cancelled");
+  assert.equal(steps.join, undefined, "what came after is never asked for");
+  assert.equal(steps.tail, undefined);
 
   const run = await db
     .selectFrom("workflow_runs")
-    .select(["status", "failure_reason", "finished_at"])
+    .select(["status", "failure_reason", "started_at", "finished_at"])
     .where("id", "=", runId)
     .executeTakeFirstOrThrow();
   assert.equal(run.status, "failed");
-  assert.equal(run.failure_reason, "non_retryable");
-  assert.ok(run.finished_at! >= steps.tail.finished_at!, "the run ends when nothing can move");
+  assert.equal(run.failure_reason, "non_retryable", "for the reason of the step that failed");
+  assert.ok(
+    run.finished_at!.getTime() - run.started_at!.getTime() < 1_500,
+    "the run doesn't wait for the step that was still running",
+  );
+
+  // The stopped step's worker hears, lets go of it, and its late result is refused.
+  const events = await db
+    .selectFrom("events")
+    .select("type")
+    .where("run_id", "=", runId)
+    .where("step_name", "=", "right")
+    .orderBy("id")
+    .execute();
+  assert.deepEqual(
+    events.map((e) => e.type),
+    ["step_ready", "step_claimed", "step_failed"],
+  );
 });
 
-test("defineWorkflow only lets a step need steps listed before it", () => {
-  /** A workflow whose second step needs the given steps. */
-  const needing = (needs: string[]) =>
-    defineWorkflow({
-      name: "bad",
-      version: "1",
-      steps: [
-        { name: "a", run: async () => null },
-        { name: "b", needs, run: async () => null },
-        { name: "c", run: async () => null },
-      ],
-    });
+test("a workflow that catches a step's failure carries on with everything that doesn't depend on it", async () => {
+  // left fails after 300ms; right takes a second, then the tail, which only waits for right, runs.
+  const runId = await store.startRun({
+    definition: diamond,
+    input: { failBranch: "left", branchMs: 300, survivorMs: 1_000, catchFailure: true },
+  });
+  await waitForFinish([runId]);
 
-  assert.throws(() => needing(["missing"]), /bad\/b needs missing, which isn't a step listed/);
-  assert.throws(() => needing(["b"]), /bad\/b needs b/, "a step can't need itself");
-  assert.throws(() => needing(["c"]), /bad\/b needs c/, "or a step after it, which could loop");
-  assert.throws(() => needing(["a", "a"]), /Duplicate need in Step bad\/b: a/);
-  assert.doesNotThrow(() => needing([]));
-  assert.doesNotThrow(() => needing(["a"]));
+  const steps = await stepsOf(runId);
+  assert.equal(steps.left.status, "failed");
+  assert.equal(steps.right.status, "succeeded", "a step beside the failed one finishes");
+  assert.equal(steps.tail.status, "succeeded", "and what comes after it still runs");
+  assert.ok(steps.tail.started_at! > steps.left.finished_at!, "tail started after left failed");
+  assert.equal(steps.join, undefined, "the join waits for left, so it is never asked for");
+
+  const run = await db
+    .selectFrom("workflow_runs")
+    .select(["status", "output"])
+    .where("id", "=", runId)
+    .executeTakeFirstOrThrow();
+  assert.deepEqual(run, {
+    status: "succeeded",
+    output: { joined: "rejected", tailed: "fulfilled" },
+  });
 });

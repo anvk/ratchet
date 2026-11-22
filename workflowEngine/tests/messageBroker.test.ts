@@ -101,7 +101,7 @@ test("a worker with no timer of its own runs a new run as soon as an orchestrato
   const notified = defineWorkflow({
     name: "notified",
     version: "1",
-    steps: [{ name: "only", run: async () => "done" }],
+    run: (ctx) => ctx.step("only", () => "done"),
   });
   const settings = { timeoutMs: 60_000 };
   const workerEngine = createWorkflowEngine({
@@ -138,16 +138,15 @@ test("a worker with no timer of its own retries a step as soon as its backoff is
   const retried = defineWorkflow({
     name: "retried",
     version: "1",
-    steps: [
-      {
-        name: "only",
-        backoffMs: 200,
-        async run(ctx) {
-          if (ctx.attempt === 1) throw new Error("first attempt fails");
-          return ctx.attempt;
+    run: (ctx) =>
+      ctx.step(
+        "only",
+        (step) => {
+          if (step.attempt === 1) throw new Error("first attempt fails");
+          return step.attempt;
         },
-      },
-    ],
+        { backoffMs: 200 },
+      ),
   });
   const settings = { timeoutMs: 60_000 };
   const workerEngine = createWorkflowEngine({
@@ -189,7 +188,7 @@ test("a polling broker has a worker look for work on its timer, with no orchestr
   const polled = defineWorkflow({
     name: "polled",
     version: "1",
-    steps: [{ name: "only", run: async () => "done" }],
+    run: (ctx) => ctx.step("only", () => "done"),
   });
   /** A worker over a polling broker with this interval, and a run started once it is waiting. */
   async function startWith(everyMs: number) {
@@ -237,23 +236,19 @@ test("a polling broker carries nothing that is published", async () => {
   await broker.close();
 });
 
-/** Runs one step that waits for ctx.signal on a worker over a fake store and a local broker. */
+/** Runs one step that waits for its abort signal on a worker over a fake store and a local broker. */
 async function runWaitingStep() {
   let signalled = false;
   const waiting = defineWorkflow({
     name: "waiting",
     version: "1",
-    steps: [
-      {
-        name: "waiting",
-        async run(ctx) {
-          await new Promise<void>((resolve) =>
-            ctx.signal.addEventListener("abort", () => resolve(), { once: true }),
-          );
-          signalled = true;
-        },
-      },
-    ],
+    run: (ctx) =>
+      ctx.step("waiting", async (step) => {
+        await new Promise<void>((resolve) =>
+          step.abortSignal.addEventListener("abort", () => resolve(), { once: true }),
+        );
+        signalled = true;
+      }),
   });
   const { store: fake, calls } = fakeStore({ workflow: "waiting" });
   const broker = localBroker();

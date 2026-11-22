@@ -31,13 +31,15 @@ export const FINISHED_RUN_STATUSES: readonly WorkflowRunStatus[] = [
 
 /**
  * Failures worth resuming once the cause is fixed: a service that was down, a
- * worker that kept crashing, a step no worker had code for. Not
+ * worker that kept crashing, or a mistake in the workflow's own code. Not
  * non_retryable: asking again won't change a decision.
  */
 export const REDRIVABLE_FAILURE_REASONS: readonly FailureReason[] = [
   "attempts_exhausted",
   "lost_worker",
   "unknown_step",
+  "nondeterministic",
+  "workflow_error",
 ];
 
 /**

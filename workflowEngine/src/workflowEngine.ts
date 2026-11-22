@@ -1,5 +1,6 @@
 import { DEFAULT_ENGINE_SETTINGS } from "./workflowEngine.constants.ts";
 import type {
+  AdvanceRun,
   MessageBroker,
   Registry,
   ScheduledRun,
@@ -10,59 +11,30 @@ import type {
 } from "./workflowEngine.types.ts";
 import { InvalidScheduleError, UnknownWorkflowError } from "./workflowEngine.errors.ts";
 import { assertCronFires } from "./workflowEngine.cron.ts";
+import { advance } from "./workflowEngine.replay.ts";
 import { assertUnique } from "./workflowEngine.utils.ts";
 import { runOrchestrator } from "./workflowEngine.orchestrator.ts";
 import { runWorker } from "./workflowEngine.worker.ts";
 
-/** Checks that a workflow is well formed and returns it, typing ctx.input in its steps. */
+/** Checks that a workflow is well formed and returns it, typing ctx.input in its code. */
 export function defineWorkflow<Input = unknown>(
   definition: WorkflowDefinition<Input>,
 ): WorkflowDefinition<Input> {
-  // The type already requires it; this is for callers that aren't type-checked.
+  // The types already require these; the checks are for callers that aren't type-checked.
+  if (typeof definition.name !== "string" || definition.name.trim() === "") {
+    throw new Error("A workflow needs a name");
+  }
   if (typeof definition.version !== "string" || definition.version.trim() === "") {
     throw new Error(`Workflow ${definition.name} needs a version`);
   }
-  if (definition.steps.length === 0) {
-    throw new Error(`Workflow ${definition.name} has no steps`);
+  if (typeof definition.run !== "function") {
+    throw new Error(`Workflow ${definition.name} needs a run function`);
   }
   if (
     definition.concurrency !== undefined &&
     !(Number.isInteger(definition.concurrency.limit) && definition.concurrency.limit > 0)
   ) {
     throw new Error(`Workflow ${definition.name} needs a whole, positive concurrency limit`);
-  }
-  assertUnique(
-    definition.steps.map((s) => s.name),
-    `step in ${definition.name}`,
-  );
-  for (const [i, step] of definition.steps.entries()) {
-    const stepLabel = `Step ${definition.name}/${step.name}`;
-    const earlierNames = definition.steps.slice(0, i).map((s) => s.name);
-    for (const need of step.needs ?? []) {
-      // Only earlier steps, which rules out unknown names, itself and loops at once.
-      if (!earlierNames.includes(need)) {
-        throw new Error(`${stepLabel} needs ${need}, which isn't a step listed before it`);
-      }
-    }
-    assertUnique(step.needs ?? [], `need in ${stepLabel}`);
-    if (step.leaseMs !== undefined && !(Number.isInteger(step.leaseMs) && step.leaseMs > 0)) {
-      throw new Error(`${stepLabel} needs a whole, positive leaseMs`);
-    }
-    if (step.timeoutMs !== undefined && !(Number.isInteger(step.timeoutMs) && step.timeoutMs > 0)) {
-      throw new Error(`${stepLabel} needs a whole, positive timeoutMs`);
-    }
-    if (
-      step.maxAttempts !== undefined &&
-      !(Number.isInteger(step.maxAttempts) && step.maxAttempts > 0)
-    ) {
-      throw new Error(`${stepLabel} needs a whole, positive maxAttempts`);
-    }
-    if (
-      step.backoffMs !== undefined &&
-      !(Number.isInteger(step.backoffMs) && step.backoffMs >= 0)
-    ) {
-      throw new Error(`${stepLabel} needs a whole backoffMs of 0 or more`);
-    }
   }
   return definition;
 }
@@ -120,6 +92,17 @@ export function createWorkflowEngine({
   const stop = new AbortController();
   const loops = new Set<Promise<void>>();
   let closed: Promise<void> | undefined;
+
+  /**
+   * Runs a run's workflow code against what it has saved. Workers hand this to
+   * the store, which calls it with the run locked. Only ever given runs of
+   * workflows in the registry, since those are the only ones a worker claims.
+   */
+  const advanceRun: AdvanceRun = ({ workflow, runId, input, steps, after }) => {
+    const definition = registry.get(workflow);
+    if (!definition) throw new UnknownWorkflowError(workflow);
+    return advance({ run: definition.run, runId, input, steps, after });
+  };
 
   /** Tracks a running worker or orchestrator, so close can wait for it to stop. */
   async function track(loop: Promise<void>) {
@@ -224,7 +207,15 @@ export function createWorkflowEngine({
     cancelRun: (runId) => store.cancelRun({ runId }),
     runWorker: ({ workerId } = {}) =>
       track(
-        runWorker({ registry, store, messageBroker, settings, stopSignal: stop.signal, workerId }),
+        runWorker({
+          registry,
+          store,
+          messageBroker,
+          settings,
+          advance: advanceRun,
+          stopSignal: stop.signal,
+          workerId,
+        }),
       ),
     runOrchestrator: () =>
       track(

@@ -11,16 +11,16 @@ export function stepDisplayStatus(step: Pick<Step, "status" | "attempt">): StepD
 }
 
 /**
- * How far each step is from the start: 0 for a step that needs nothing, else
- * one more than the furthest step it needs. Steps at the same depth can run
- * side by side, so the diagram lays them out in one column.
+ * How far each step is from the start: 0 for a step that came after nothing,
+ * else one more than the furthest step it came after. Steps at the same depth
+ * ran side by side, so the diagram lays them out in one column.
  */
-export function stepDepths(steps: Pick<Step, "name" | "needs">[]): Map<string, number> {
+export function stepDepths(steps: Pick<Step, "name" | "asked_after">[]): Map<string, number> {
   const depths = new Map<string, number>();
-  const depthOf = (step: Pick<Step, "name" | "needs">): number => {
+  const depthOf = (step: Pick<Step, "name" | "asked_after">): number => {
     const known = depths.get(step.name);
     if (known !== undefined) return known;
-    const needed = step.needs.map((n) => steps.find((s) => s.name === n));
+    const needed = step.asked_after.map((n) => steps.find((s) => s.name === n));
     const depth = Math.max(-1, ...needed.map((s) => (s ? depthOf(s) : -1))) + 1;
     depths.set(step.name, depth);
     return depth;

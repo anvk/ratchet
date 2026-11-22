@@ -1,69 +1,111 @@
 import type { FailureReason } from "./workflowEngine.constants.ts";
 
-/** What a step's run function receives from the engine. */
-export interface StepContext<Input = any> {
+/** The settings a step may be given where the function asks for it. */
+export interface StepOptions {
+  /** How long a worker may go without a heartbeat before the step is given to another worker. */
+  leaseMs?: number;
+  /** How many times the step may run, counting the first. */
+  maxAttempts?: number;
+  /** The wait before the first retry, doubling for each one after it. */
+  backoffMs?: number;
+  /** How long one attempt may run. */
+  timeoutMs?: number;
+}
+
+/** What a step's function receives when it runs. */
+export interface StepRunContext {
   runId: string;
   stepName: string;
+  /** Starts at 1. */
   attempt: number;
+  /** The same on every attempt of this step. Pass it to anything with side effects. */
+  idempotencyKey: string;
+  /** Fires when the result won't be used: the step was taken away, or it ran past its time limit. */
+  abortSignal: AbortSignal;
+}
+
+/** The code of one step. */
+export type StepFunction<Output = unknown> = (step: StepRunContext) => Promise<Output> | Output;
+
+/** What a workflow function receives. */
+export interface WorkflowContext<Input = unknown> {
+  runId: string;
   /** The input the run was started with. */
   input: Input;
   /**
-   * Outputs of every step this one depends on, directly or through other
-   * steps, by step name. Steps running side by side never see each other's.
+   * Asks for a step. If the run has already saved this step's output, that
+   * output comes back and `fn` is not called. If the step failed for good, a
+   * StepFailedError is thrown here, which the function may catch. Otherwise
+   * the promise doesn't settle in this replay: the function waits here until
+   * it is run again with the step's result.
+   *
+   * A name may be used once in a run. Steps asked for without waiting in
+   * between, as in `Promise.all`, are all asked for together.
    */
-  outputs: Record<string, any>;
-  /**
-   * Stays the same across every attempt of this step. Pass it to anything with
-   * side effects, such as a payment provider, so running the step again can't
-   * repeat the effect.
-   */
-  idempotencyKey: string;
-  /**
-   * Fires if this worker loses the step's lease, meaning another worker may
-   * already be running it, or if the attempt runs past its time limit.
-   * Either way the result won't be used, so stop early if you can.
-   */
-  signal: AbortSignal;
+  step<Output>(name: string, fn: StepFunction<Output>, options?: StepOptions): Promise<Output>;
 }
 
-/** One step of a workflow: its name, how it runs, and the code to run. */
-export interface StepDefinition<Input = any> {
-  /** Stable identifier, unique within the workflow. */
+/**
+ * A workflow as code. It must take the same path every time it is run with the
+ * same saved results, so it may only wait on `ctx`, and anything that can
+ * differ between two runs (the clock, random numbers, anything outside the
+ * process) belongs inside a step.
+ */
+export type WorkflowFunction<Input = unknown, Output = unknown> = (
+  ctx: WorkflowContext<Input>,
+) => Promise<Output> | Output;
+
+/**
+ * What a run has saved about one step: its output, why it failed for good, or
+ * `open` for a step the function asked for that hasn't finished.
+ */
+export type SavedStep =
+  | { status: "succeeded"; output: unknown }
+  | { status: "failed"; reason: FailureReason; error: string }
+  | { status: "open" };
+
+/** A step a function asked for. */
+export interface AskedStep {
   name: string;
+  options: StepOptions;
   /**
-   * Steps that must succeed before this one starts. Steps whose needs are met
-   * run side by side. Defaults to the step listed before it, so steps without
-   * needs run in order; `[]` makes another starting step. A step can only need
-   * steps listed before it, which also means steps can't wait on each other in
-   * a loop.
+   * The steps this one comes straight after: those whose results the function
+   * had to have before it would ask for this step, leaving out any that another
+   * of them already comes after. For a step asked for once "charge" and
+   * "reserve" were done, where each of those came after "load", this is
+   * "charge" and "reserve". Worked out by trying: a step counts if, without its
+   * result, the function doesn't get as far as asking for this one.
    */
-  needs?: string[];
+  after: string[];
+}
+
+/**
+ * What a workflow function did when run against what is saved.
+ *
+ * - `completed`: it returned.
+ * - `failed`: it threw, or it broke one of the rules that replaying depends on.
+ * - `parked`: it is waiting for steps that haven't finished. `requested` are
+ *   the ones nothing is saved about yet, in the order it asked; `waitingOn` are
+ *   all the unfinished steps it asked for, those included.
+ */
+export type Decision =
+  | { kind: "completed"; output: unknown }
+  | { kind: "failed"; reason: FailureReason; error: string; step?: string }
+  | { kind: "parked"; requested: AskedStep[]; waitingOn: string[] };
+
+/** What a replay needs: the function, and the run it is being replayed for. */
+export interface ReplayRequest<Input = unknown> {
+  run: WorkflowFunction<Input>;
+  runId: string;
+  input: Input;
+  /** Everything the run has saved, by step name. */
+  steps: Record<string, SavedStep>;
   /**
-   * How long a worker may go without a heartbeat before this step is given to
-   * another worker. Defaults to the engine's leaseMs. Heartbeats come every
-   * third of it, so a step that blocks the event loop for longer loses its lease.
+   * For steps the run already has, the steps each came straight after (see
+   * AskedStep.after). Only used to work out the same for new steps with fewer
+   * tries; leaving it out costs time, not correctness.
    */
-  leaseMs?: number;
-  /**
-   * How many times this step may run, counting the first, before its run fails.
-   * A thrown error and a lost lease both use up an attempt; a NonRetryableError
-   * fails at once. Defaults to the engine's maxAttempts.
-   */
-  maxAttempts?: number;
-  /**
-   * The wait before the first retry, doubling for each one after it. Defaults to
-   * the engine's backoffMs.
-   */
-  backoffMs?: number;
-  /**
-   * How long one attempt may run. When it passes, `ctx.signal` fires and the
-   * attempt fails like a thrown error, so it is retried while the step has
-   * attempts left. Defaults to the engine's timeoutMs. The function itself can't
-   * be stopped: if it ignores the signal it carries on in the background and its
-   * result is discarded.
-   */
-  timeoutMs?: number;
-  run(ctx: StepContext<Input>): Promise<unknown>;
+  after?: Record<string, string[]>;
 }
 
 /**
@@ -85,19 +127,42 @@ export interface WorkflowDefinition<Input = any> {
   /** Stable identifier, unique within the registry. */
   name: string;
   /**
-   * Any text you choose, such as "1". Changing it makes a new version of the
-   * workflow, as changing its steps does, so workers with the old code and
-   * workers with the new never share a run. The engine can't see inside `run`,
-   * so change it when you edit a step's code in a way that runs already in
-   * progress couldn't carry on with, such as a different output. Leave it alone
-   * for a fix those runs can pick up.
+   * Any text you choose, such as "1". A run belongs to the version it started
+   * on, and only workers with that version work on it, so workers with old
+   * code and workers with new never share a run. The engine can't see inside
+   * `run`, so this is the only thing that makes a new version: change it when
+   * you edit the workflow in a way that runs already in progress couldn't
+   * carry on with, such as a step renamed, removed or asked for in a different
+   * order. Leave it alone for a fix those runs can pick up.
    */
   version: string;
   /** Keeps runs that share a key from overlapping. Runs are not limited by default. */
   concurrency?: WorkflowConcurrency<Input>;
-  /** Each step is listed after the steps it needs. */
-  steps: StepDefinition<Input>[];
+  /**
+   * The workflow's code. It asks for steps with `ctx.step`, and whatever it
+   * returns is the run's output. It is run again from the top whenever one of
+   * its steps finishes, getting back the results already saved, so it must
+   * take the same path each time: see WorkflowFunction.
+   */
+  run: WorkflowFunction<Input>;
 }
+
+/**
+ * Runs a run's workflow code against what the run has saved, and says what it
+ * did. The engine gives one to the store methods that need it, since the store
+ * has rows but not your code. It must be given a run of a workflow, and a
+ * version, that this process has.
+ */
+export type AdvanceRun = (run: {
+  /** The workflow's name. */
+  workflow: string;
+  runId: string;
+  input: unknown;
+  /** Everything the run has saved, by step name. */
+  steps: Record<string, SavedStep>;
+  /** For each step the run has, the steps it came straight after. See ReplayRequest.after. */
+  after: Record<string, string[]>;
+}) => Promise<Decision>;
 
 /** Every workflow an engine knows about, by name. */
 export type Registry = Map<string, WorkflowDefinition>;
@@ -121,10 +186,8 @@ export type ClaimOrder = "sticky" | "fair" | "oldest-run-first";
  */
 export interface Claim {
   stepRunId: string;
-  /** Used with the workflow name to find the step's code in the registry. */
+  /** Used to find the step's code, by running the workflow up to where it asks for this step. */
   stepName: string;
-  /** Where the step is listed in the workflow. */
-  position: number;
   /** Starts at 1. With workerId, proves this worker still owns the step. */
   attempt: number;
   /** The lease this claim was given, which every heartbeat renews. */
@@ -135,8 +198,8 @@ export interface Claim {
   workflow: string;
   /** The input the run was started with. */
   input: unknown;
-  /** Outputs of the steps this one depends on, directly or not, by step name. */
-  outputs: Record<string, unknown>;
+  /** Everything the run had saved when the step was claimed, by step name, this step included. */
+  saved: Record<string, SavedStep>;
 }
 
 /** Optional details on a row in the events table. */
@@ -199,25 +262,35 @@ export interface MessageBroker {
  * file or another database can replace Postgres by implementing it.
  *
  * Every method must be atomic: a state change, its events and its messages
- * are saved together or not at all. A method that makes a step claimable
- * saves a `step_ready` message, and cancelRun saves a `run_cancelled` one, for
- * relayMessages to hand over later. A step that will retry is claimable when
- * its backoff ends, so its message is held back until then.
+ * are saved together or not at all. A method that gives workers something to
+ * do (a step to claim, or a run whose code should be run again) saves a
+ * `step_ready` message, and one that stops a running step saves a
+ * `run_cancelled` one, for relayMessages to hand over later. A step that will
+ * retry is claimable when its backoff ends, so its message is held back until
+ * then.
+ *
+ * What a run does next is decided by its workflow's code, never by the store.
+ * **Advancing** a run means: with the run locked, hand everything it has saved
+ * to an AdvanceRun and act on the decision. `parked`: make each step it asked
+ * for claimable. `completed`: the run succeeds, with that output. `failed`: the
+ * run fails, for that reason. A run lasts exactly as long as its code, so when
+ * it finishes either way, steps it asked for that haven't started are skipped,
+ * steps still running are failed with reason `cancelled` and their late results
+ * refused, and a run in a group gives its slot to the oldest waiting run. Since
+ * a run is only ever advanced under its lock, two steps finishing at once are
+ * seen one after the other, and a step waiting for both is asked for once.
  */
 export interface WorkflowStore {
-  /**
-   * Saves each workflow's plan. Safe to repeat. An edit to the plan, or to the
-   * definition's `version`, creates a new version.
-   */
+  /** Saves each workflow's name and version, so runs of it can be started. Safe to repeat. */
   syncWorkflows(workflows: WorkflowDefinition[]): Promise<void>;
   /**
-   * Creates a run with its starting steps (those that need nothing) ready to
-   * claim, and returns the run's id.
+   * Creates a run and returns its id. The run has no steps yet: it is marked
+   * for a worker to advance, which is when its code first runs.
    * If the caller's idempotencyKey was already used, creates nothing and returns
    * the existing run's id.
    * With `concurrency`, the run is admitted only if fewer than `limit` runs with
-   * that key are in progress; otherwise it is created waiting, with no step
-   * ready, until one finishes.
+   * that key are in progress; otherwise it is created waiting, and is marked
+   * to be advanced only when one finishes.
    */
   startRun(request: {
     definition: WorkflowDefinition;
@@ -228,8 +301,8 @@ export interface WorkflowStore {
   /**
    * Claims a ready step belonging to one of these workflows, choosing by order,
    * or returns null if there is none. Only runs started on the same version of
-   * a workflow count, so a worker never runs a step with different code from
-   * the run's plan. Two workers must never receive the same step.
+   * a workflow count, so a worker never runs a step with code the run didn't
+   * start on. Two workers must never receive the same step.
    */
   claimStep(request: {
     workerId: string;
@@ -238,42 +311,47 @@ export interface WorkflowStore {
     defaults: StepDefaults;
   }): Promise<Claim | null>;
   /**
-   * Records success, then readies every step whose needs have now all
-   * succeeded, or finishes the run once nothing can move: succeeded if every
-   * step did, failed if any failed for good; finishing a run in a group gives
-   * its slot to the oldest waiting run. Two steps finishing at
-   * once must ready a step that needs both exactly once. With claimNext, the
-   * first newly ready step goes straight to the same worker in the same
-   * transaction, so no other worker can take it in between. `completed` is
-   * false if the claim is stale.
+   * Advances a run that is marked for it and belongs to one of these
+   * workflows, and returns whether there was one. Only a run of a version in
+   * `workflows` is taken, and two processes never advance the same run at
+   * once. If `advance` throws, nothing changes and the run stays marked.
+   */
+  advanceRun(request: { workflows: WorkflowDefinition[]; advance: AdvanceRun }): Promise<boolean>;
+  /**
+   * Records success, then advances the run in the same transaction. With
+   * claimNext, the first step that advance makes claimable goes straight to
+   * the same worker, so no other worker can take it in between. `completed` is
+   * false if the claim is stale, and then nothing else happens.
    */
   completeStep(request: {
     claim: Claim;
     output: unknown;
     claimNext: boolean;
     defaults: StepDefaults;
+    advance: AdvanceRun;
   }): Promise<{ completed: boolean; next: Claim | null }>;
   /** Pushes a claim's lease forward by its leaseMs. False if this worker no longer owns the step. */
   extendLease(claim: Claim): Promise<boolean>;
   /**
    * Makes every running step whose lease has expired ready again, so another
-   * worker can claim it, or fails its run if it has no attempts left. Returns
-   * how many it found. Safe to run from several processes at once.
+   * worker can claim it, or fails the step for good if it has no attempts
+   * left and marks its run to be advanced. Returns how many it found. Safe to
+   * run from several processes at once.
    */
   sweepExpiredLeases(request: { defaults: StepDefaults }): Promise<number>;
   /**
    * Records a failure. If `final` is null and the step has attempts left, the
    * step becomes ready again after a backoff (`retryInMs`). Otherwise it fails
-   * for good, with `failureReason` saying why: steps that depend on it are
-   * skipped, every other step carries on, and the run fails once nothing is
-   * left to move; a run that fails gives its slot in a group to the oldest
-   * waiting run. `recorded` is false if the claim is stale.
+   * for good, with `failureReason` saying why, and the run is advanced in the
+   * same transaction: its code is handed the failure, and either catches it and
+   * carries on or fails the run. `recorded` is false if the claim is stale.
    */
   failStep(request: {
     claim: Claim;
     error: string;
     final: FinalFailure | null;
     defaults: StepDefaults;
+    advance: AdvanceRun;
   }): Promise<{
     recorded: boolean;
     retryInMs: number | null;
@@ -281,9 +359,11 @@ export interface WorkflowStore {
   }>;
   /**
    * Resumes a run that was cancelled, or that failed for a reason in
-   * REDRIVABLE_FAILURE_REASONS, from the steps that didn't succeed, with fresh attempts. Succeeded steps keep
-   * their outputs. A run in a group that is full waits for a slot before its
-   * steps become ready. Returns false, changing nothing, for any other run.
+   * REDRIVABLE_FAILURE_REASONS. Steps that succeeded keep their outputs. Every
+   * other step is put back to `pending` with fresh attempts, and becomes
+   * claimable when the workflow's code asks for it again. The run is marked to
+   * be advanced; one in a group that is full waits for a slot first. Returns
+   * false, changing nothing, for any other run.
    */
   redriveRun(request: { runId: string }): Promise<boolean>;
   /**
@@ -370,8 +450,9 @@ export interface WorkflowStore {
 
 /**
  * Why a worker knows a failure must not be retried: the step threw a
- * NonRetryableError, or the worker has no code for it. The store works out the
- * other reasons itself.
+ * NonRetryableError, or the workflow's code never asked for the step when the
+ * worker ran it to find the step's code. The store works out the other reasons
+ * itself.
  */
 export type FinalFailure = Extract<FailureReason, "non_retryable" | "unknown_step">;
 
@@ -394,11 +475,11 @@ export interface WorkflowEngineSettings {
   closeTimeoutMs: number;
   /** How workers choose their next step. See ClaimOrder. */
   claimOrder: ClaimOrder;
-  /** The lease for steps that don't set their own. See StepDefinition.leaseMs. */
+  /** The lease for steps that don't set their own. See StepOptions.leaseMs. */
   leaseMs: number;
   /**
    * How long one attempt may run, for steps that don't set their own. See
-   * StepDefinition.timeoutMs. The one setting with no default, so no step can
+   * StepOptions.timeoutMs. The one setting with no default, so no step can
    * run forever without someone having chosen its limit.
    */
   timeoutMs: number;
@@ -413,9 +494,9 @@ export interface WorkflowEngineSettings {
    * workers are told about it.
    */
   relayIntervalMs: number;
-  /** How many times a step may run, for steps that don't set their own. See StepDefinition.maxAttempts. */
+  /** How many times a step may run, for steps that don't set their own. See StepOptions.maxAttempts. */
   maxAttempts: number;
-  /** The first retry's wait, for steps that don't set their own. See StepDefinition.backoffMs. */
+  /** The first retry's wait, for steps that don't set their own. See StepOptions.backoffMs. */
   backoffMs: number;
   /** The longest a retry ever waits, however many attempts came before. */
   maxBackoffMs: number;
