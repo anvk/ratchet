@@ -1,3 +1,5 @@
+import type { FailureReason } from "./workflowEngine.constants.ts";
+
 /**
  * Thrown by a step to fail for good, without retries: for a decision, such as
  * "insufficient funds", rather than a glitch that might pass, such as a timeout.
@@ -5,6 +7,23 @@
  */
 export class NonRetryableError extends Error {
   override name = "NonRetryableError";
+}
+
+/**
+ * Thrown into a workflow function, where it asked for the step, when that step
+ * has failed for good. The function may catch it and carry on. `reason` says
+ * why the step failed, and the message is the step's own error.
+ */
+export class StepFailedError extends Error {
+  override name = "StepFailedError";
+  readonly step: string;
+  readonly reason: FailureReason;
+
+  constructor({ step, reason, message }: { step: string; reason: FailureReason; message: string }) {
+    super(message);
+    this.step = step;
+    this.reason = reason;
+  }
 }
 
 /** Thrown for a name that isn't one of the engine's workflows, by startRun (no run is created) and by every `engine.schedules` method. */
